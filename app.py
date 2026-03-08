@@ -4,15 +4,15 @@ import plotly.graph_objects as go
 import time
 from scipy.interpolate import griddata
 
-from data_fetcher import fetch_and_calculate_iv
+from data_fetcher import fetch_and_calculate_iv, get_ticker_metrics
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Implied Volatility Surface v3 Modular", layout="wide", page_icon="📈")
+st.set_page_config(page_title="Implied Volatility Surface v4 Modular (Greeks)", layout="wide", page_icon="📈")
 
 # --- UI LOGIC ---
 
-st.title("Implied Volatility (IV) Surface - v3 Modular")
-st.markdown("Application combining `JAX` vectorization speed with elegant, interpolated Grid Surface and Modular Design.")
+st.title("Implied Volatility (IV) Surface - v4 Greeks & Auto-Rates")
+st.markdown("Application combining `JAX` vectorization speed with elegant, interpolated Grid Surface, Auto Dividend/Rate fetching, and **Interactive Greeks Toolkit**.")
 
 # Streamlit Caching wrapper over external logic
 @st.cache_data(ttl=300)
@@ -22,6 +22,10 @@ def cached_data_fetch(symbol, option_type, period, risk_free_rate, div_yield, mi
 with st.sidebar:
     st.header("Configuration")
     symbol = st.text_input("Ticker Symbol", value="SPY").upper()
+    
+    # Auto-fetch risk-free rate and dividend yield based on ticker
+    auto_rf, auto_div = get_ticker_metrics(symbol)
+    
     option_type = st.selectbox("Option Type", ["call", "put"]).lower()
     
     y_axis_type = st.selectbox("Y-Axis metric", ["Strike Price", "Log-Moneyness"])
@@ -32,13 +36,16 @@ with st.sidebar:
     )
     
     period = st.slider("Max Expirations to fetch", min_value=1, max_value=25, value=12)
-    risk_free_rate = st.number_input("Risk Free Rate", value=0.04, format="%.4f")
-    div_yield = st.number_input("Dividend Yield", value=0.0, format="%.4f")
     
-    generate_btn = st.button("Generate Smooth Graph", type="primary")
+    st.markdown("---")
+    st.markdown("**(Auto-fetched parameters)**")
+    risk_free_rate = st.number_input("Risk Free Rate (%)", value=float(auto_rf), format="%.4f")
+    div_yield = st.number_input("Dividend Yield (%)", value=float(auto_div), format="%.4f")
+    
+    generate_btn = st.button("Generate Smooth Graph with Greeks", type="primary")
 
 if generate_btn:
-    with st.spinner("Fetching data and computing IV using JAX..."):
+    with st.spinner("Fetching data and computing IV & Greeks using JAX..."):
          start_time = time.time()
          
          surface_data, spot_price, err_msg = cached_data_fetch(
@@ -49,7 +56,7 @@ if generate_btn:
          if err_msg:
              st.error(err_msg)
          elif surface_data is not None and not surface_data.empty:
-             st.success(f"Calculated {len(surface_data)} valid IV points in {elapsed:.2f} s")
+             st.success(f"Calculated {len(surface_data)} valid IV points & Greeks in {elapsed:.2f} s")
              
              X = surface_data['dtes'].values
              Z = surface_data['ivs'].values
@@ -68,19 +75,47 @@ if generate_btn:
                  st.error("Not enough variation in data to interpolate a surface. Try expanding the data range.")
                  st.stop()
                  
-             # --- THE MAGICAL SMOOTH SURFACE TRICK ---
+             # --- THE MAGICAL SMOOTH SURFACE TRICK (NOW WITH GREEKS) ---
              xi = np.linspace(X.min(), X.max(), 30)
              yi = np.linspace(Y.min(), Y.max(), 30)
              xi, yi = np.meshgrid(xi, yi)
 
-             zi = griddata((X, Y), Z, (xi, yi), method="linear")
-             zi2 = griddata((X, Y), Z, (xi, yi), method="nearest")
-             zi = np.where(np.isnan(zi), zi2, zi)
+             def interpolate_grid(val_array):
+                 g = griddata((X, Y), val_array, (xi, yi), method="linear")
+                 return np.where(np.isnan(g), griddata((X, Y), val_array, (xi, yi), method="nearest"), g)
+
+             zi = interpolate_grid(Z)
+             # Interpolate Greeks to match the regular grid layout
+             delta_i = interpolate_grid(surface_data['delta'].values)
+             gamma_i = interpolate_grid(surface_data['gamma'].values)
+             vega_i  = interpolate_grid(surface_data['vega'].values)
+             theta_i = interpolate_grid(surface_data['theta'].values)
+             price_i = interpolate_grid(surface_data['price'].values)
              
-             fig = go.Figure(data=[go.Surface(x=xi, y=yi, z=zi, colorscale="Viridis")])
+             # Stack for Plotly customdata
+             custom_data = np.stack((delta_i, gamma_i, vega_i, theta_i, price_i), axis=-1)
+             
+             fig = go.Figure(data=[go.Surface(
+                 x=xi, y=yi, z=zi, 
+                 customdata=custom_data,
+                 hovertemplate=(
+                     "<b>DTE</b>: %{x:.2f} yrs<br>" +
+                     "<b>%{_y_label}</b>: %{y:.2f}<br>" +
+                     "<b>IV</b>: %{z:.2f}%<br>" +
+                     "<extra>" +
+                     "<b>Opt Price</b>: $%{customdata[4]:.2f}<br>" +
+                     "<b>Delta</b>: %{customdata[0]:.4f}<br>" +
+                     "<b>Gamma</b>: %{customdata[1]:.4f}<br>" +
+                     "<b>Vega</b>: %{customdata[2]:.4f}<br>" +
+                     "<b>Theta</b>: %{customdata[3]:.4f}" +
+                     "</extra>"
+                 ).replace('%{_y_label}', 'Strike' if y_axis_type != "Log-Moneyness" else 'Log-Money'),
+                 colorscale="Viridis",
+                 colorbar=dict(title="IV (%)")
+             )])
 
              fig.update_layout(
-                 title=f"{symbol} Volatility Surface ({option_type.capitalize()}) - Scipy Interpolated",
+                 title=f"{symbol} Volatility Surface ({option_type.capitalize()}) - Interactive Greeks",
                  scene=dict(
                      xaxis_title='Time to Expiration (Years)',
                      yaxis_title=y_label,
@@ -94,4 +129,4 @@ if generate_btn:
          else:
              st.warning("Failed to generate chart due to missing or strictly filtered data.")
 else:
-    st.info("👈 Enter parameters in the sidebar and click 'Generate Smooth Graph'.")
+    st.info("👈 Enter parameters in the sidebar and click 'Generate Smooth Graph with Greeks'.")
