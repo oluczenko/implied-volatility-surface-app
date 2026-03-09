@@ -39,8 +39,3 @@ venv.bak/
 # Jupyter Notebook
 .ipynb_checkpoints
 
-# Tymczasowe foldery z wersjami
-QuantProject_app_v1/
-QuantProject_app_v2/
-QuantProject_app_v3/
-QuantProject_app_v4/
