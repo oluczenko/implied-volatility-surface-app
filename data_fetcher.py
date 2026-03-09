@@ -11,21 +11,21 @@ def get_ticker_metrics(symbol):
     """Fetches real-time Risk Free Rate (^TNX) and Dividend Yield."""
     try:
         tnx = yf.Ticker("^TNX")
-        # Wyciągamy rentowność (%) bezpośrednio na wykres bez dzielenia przez 100
+        # Extract the yield (%) directly for the chart without dividing by 100
         rf_rate_pct = float(tnx.fast_info.last_price)
     except Exception:
-        rf_rate_pct = 4.2 # fallback w procentach
+        rf_rate_pct = 4.2 # fallback in percentage
         
     try:
         ticker = yf.Ticker(symbol)
-        # Yahoo Finance posiada dwa pola:
-        # dividendRate (np. 1.00 USD) oraz dividendYield (np. 0.0044 czyli 0.44%)
+        # Yahoo Finance has two fields:
+        # dividendRate (e.g., 1.00 USD) and dividendYield (e.g., 0.0044 which is 0.44%)
         div_yield_decimal = ticker.info.get('dividendYield', 0.0)
         
         if div_yield_decimal is None:
              div_yield_pct = 0.0
         else:
-             # API Yahoo domyślnie rzuca gotowy wskaźnik jako % (np. ARCC = 10.25, AAPL = 0.4)
+             # Yahoo API by default returns the ready indicator as % (e.g., ARCC = 10.25, AAPL = 0.4)
              div_yield_pct = float(div_yield_decimal)
              
     except Exception:
