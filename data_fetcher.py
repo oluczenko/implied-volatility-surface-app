@@ -48,17 +48,25 @@ def fetch_and_calculate_iv(symbol, option_type, period, risk_free_rate_pct, div_
     if not exp_dates:
          return None, None, f"No options available for symbol {symbol}."
          
-    if period is not None and period > 0:
-        exp_dates = exp_dates[:period]
+    now = dt.datetime.now()
+    valid_exp_dates = []
+    for d in exp_dates:
+        expiry_dt = dt.datetime.strptime(d, '%Y-%m-%d')
+        T_val = (expiry_dt - now).days / 365.0
+        # Removing noise from 0DTE options (approx < 25 days)
+        if T_val > 0.07:
+            valid_exp_dates.append((d, T_val))
+            
+    if period is not None and int(period) > 0:
+        valid_exp_dates = valid_exp_dates[:int(period)]
 
     all_data = []
-    now = dt.datetime.now()
     
     # Calculate strike boundaries based on percentage of spot
     min_strike = spot_price * (min_strike_pct / 100.0)
     max_strike = spot_price * (max_strike_pct / 100.0)
 
-    for d in exp_dates:
+    for d, T_val in valid_exp_dates:
         try:
             chain = ticker.option_chain(d)
         except Exception:
@@ -68,13 +76,7 @@ def fetch_and_calculate_iv(symbol, option_type, period, risk_free_rate_pct, div_
         # Filter strictly by limits computed from sliders
         df = df[(df['strike'] >= min_strike) & (df['strike'] <= max_strike)]
         
-        expiry_dt = dt.datetime.strptime(d, '%Y-%m-%d')
-        T_val = (expiry_dt - now).days / 365.0
-        
-        # INCREASED THRESHOLD: Remove noise from 0DTE options (approx < 25 days)
-        if T_val <= 0.07:  
-            continue
-            
+        df = df.copy()
         df['T'] = T_val
         df['otype_val'] = 1.0 if option_type == 'call' else -1.0
         

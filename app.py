@@ -56,25 +56,43 @@ if generate_btn:
          if err_msg:
              st.error(err_msg)
          elif surface_data is not None and not surface_data.empty:
-             st.success(f"Calculated {len(surface_data)} valid IV points & Greeks in {elapsed:.2f} s")
-             
-             X = surface_data['dtes'].values
-             Z = surface_data['ivs'].values
-             
-             if y_axis_type == "Log-Moneyness":
-                 T = surface_data['dtes'].values
-                 F = spot_price * np.exp((risk_free_rate - div_yield) * T)
-                 F = np.maximum(F, 1e-12)
-                 Y = np.log(surface_data["strike"].values / F)
-                 y_label = "Log-moneyness ln(K/F)"
-             else:
-                 Y = surface_data['strike'].values
-                 y_label = "Strike Price ($)"
-                 
-             if len(np.unique(X)) < 2 or len(np.unique(Y)) < 2:
-                 st.error("Not enough variation in data to interpolate a surface. Try expanding the data range.")
-                 st.stop()
-                 
+             st.session_state['surface_data'] = surface_data
+             st.session_state['spot_price'] = spot_price
+             st.session_state['calc_time'] = elapsed
+             st.session_state['symbol'] = symbol
+             st.session_state['option_type'] = option_type
+         else:
+             st.warning("Failed to generate chart due to missing or strictly filtered data.")
+
+if 'surface_data' in st.session_state:
+     surface_data = st.session_state['surface_data']
+     spot_price = st.session_state['spot_price']
+     elapsed = st.session_state['calc_time']
+     calc_symbol = st.session_state['symbol']
+     calc_otype = st.session_state['option_type']
+     
+     st.success(f"Calculated {len(surface_data)} valid IV points & Greeks in {elapsed:.2f} s")
+     
+     if y_axis_type == "Log-Moneyness":
+         T = surface_data['dtes'].values
+         F = spot_price * np.exp((risk_free_rate - div_yield) * T)
+         F = np.maximum(F, 1e-12)
+         surface_data['Y_metric'] = np.log(surface_data["strike"].values / F)
+         y_label = "Log-moneyness ln(K/F)"
+     else:
+         surface_data['Y_metric'] = surface_data['strike'].values
+         y_label = "Strike Price ($)"
+         
+     tab1, tab2 = st.tabs(["3D IV Surface", "2D Volatility Smile"])
+     
+     with tab1:
+         X = surface_data['dtes'].values
+         Y = surface_data['Y_metric'].values
+         Z = surface_data['ivs'].values
+         
+         if len(np.unique(X)) < 2 or len(np.unique(Y)) < 2:
+             st.error("Not enough variation in data to interpolate a surface. Try expanding the data range.")
+         else:
              # --- THE MAGICAL SMOOTH SURFACE TRICK (NOW WITH GREEKS) ---
              xi = np.linspace(X.min(), X.max(), 30)
              yi = np.linspace(Y.min(), Y.max(), 30)
@@ -115,7 +133,7 @@ if generate_btn:
              )])
 
              fig.update_layout(
-                 title=f"{symbol} Volatility Surface ({option_type.capitalize()}) - Interactive Greeks",
+                 title=f"{calc_symbol} Volatility Surface ({calc_otype.capitalize()}) - Interactive Greeks",
                  scene=dict(
                      xaxis_title='Time to Expiration (Years)',
                      yaxis_title=y_label,
@@ -126,7 +144,53 @@ if generate_btn:
                  margin=dict(l=0, r=0, b=0, t=50)
              )
              st.plotly_chart(fig, use_container_width=True)
-         else:
-             st.warning("Failed to generate chart due to missing or strictly filtered data.")
+             
+     with tab2:
+         st.subheader("2D Cross-Section (Volatility Smile)")
+         unique_dtes = np.sort(surface_data['dtes'].unique())
+         if len(unique_dtes) > 0:
+             selected_dte = st.selectbox("Select Expiration (DTE in Years)", unique_dtes, format_func=lambda x: f"{x:.4f} yrs (~{int(x*365)} days)")
+             
+             smile_data = surface_data[surface_data['dtes'] == selected_dte].sort_values(by='Y_metric')
+             
+             if not smile_data.empty:
+                 custom_data_2d = np.stack((
+                     smile_data['delta'].values, 
+                     smile_data['gamma'].values, 
+                     smile_data['vega'].values, 
+                     smile_data['theta'].values, 
+                     smile_data['price'].values
+                 ), axis=-1)
+                 
+                 fig2d = go.Figure(data=[go.Scatter(
+                     x=smile_data['Y_metric'],
+                     y=smile_data['ivs'],
+                     mode='lines+markers',
+                     marker=dict(size=8, color=smile_data['ivs'], colorscale='Viridis', showscale=True, colorbar=dict(title="IV (%)")),
+                     line=dict(width=2, color='rgba(255,255,255,0.2)'),
+                     customdata=custom_data_2d,
+                     hovertemplate=(
+                         "<b>%{_y_label}</b>: %{x:.2f}<br>" +
+                         "<b>IV</b>: %{y:.2f}%<br>" +
+                         "<extra>" +
+                         "<b>Opt Price</b>: $%{customdata[4]:.2f}<br>" +
+                         "<b>Delta</b>: %{customdata[0]:.4f}<br>" +
+                         "<b>Gamma</b>: %{customdata[1]:.4f}<br>" +
+                         "<b>Vega</b>: %{customdata[2]:.4f}<br>" +
+                         "<b>Theta</b>: %{customdata[3]:.4f}" +
+                         "</extra>"
+                     ).replace('%{_y_label}', 'Strike' if y_axis_type != "Log-Moneyness" else 'Log-Money')
+                 )])
+                 
+                 fig2d.update_layout(
+                     title=f"{calc_symbol} Volatility Smile ({calc_otype.capitalize()}) for DTE = {selected_dte:.4f}",
+                     xaxis_title=y_label,
+                     yaxis_title="Implied Volatility (%)",
+                     height=600,
+                     margin=dict(l=0, r=0, b=0, t=50)
+                 )
+                 st.plotly_chart(fig2d, use_container_width=True)
+             else:
+                 st.warning("No data points for selected DTE.")
 else:
     st.info("👈 Enter parameters in the sidebar and click 'Generate Smooth Graph with Greeks'.")

@@ -7,7 +7,7 @@ import numpy as np
 
 @jit
 def _calc_d1_d2(S, K, T, r, sigma, q):
-    """Pomocnicza funkcja wyliczająca parametry d1 i d2."""
+    """Helper function to calculate d1 and d2 parameters."""
     d1 = (jnp.log(S / K) + (r - q + 0.5 * sigma ** 2) * T) / (sigma * jnp.sqrt(T))
     d2 = d1 - sigma * jnp.sqrt(T)
     return d1, d2
