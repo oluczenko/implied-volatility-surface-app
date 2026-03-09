@@ -3,10 +3,41 @@ import datetime as dt
 import pandas as pd
 import numpy as np
 import jax.numpy as jnp
-from jax_core import solve_iv_vectorized
+from jax_core import solve_iv_vectorized, vectorized_greeks
 import streamlit as st
 
-def fetch_and_calculate_iv(symbol, option_type, period, risk_free_rate, div_yield, min_strike_pct, max_strike_pct):
+@st.cache_data(ttl=3600)
+def get_ticker_metrics(symbol):
+    """Fetches real-time Risk Free Rate (^TNX) and Dividend Yield."""
+    try:
+        tnx = yf.Ticker("^TNX")
+        # Wyciągamy rentowność (%) bezpośrednio na wykres bez dzielenia przez 100
+        rf_rate_pct = float(tnx.fast_info.last_price)
+    except Exception:
+        rf_rate_pct = 4.2 # fallback w procentach
+        
+    try:
+        ticker = yf.Ticker(symbol)
+        # Yahoo Finance posiada dwa pola:
+        # dividendRate (np. 1.00 USD) oraz dividendYield (np. 0.0044 czyli 0.44%)
+        div_yield_decimal = ticker.info.get('dividendYield', 0.0)
+        
+        if div_yield_decimal is None:
+             div_yield_pct = 0.0
+        else:
+             # API Yahoo domyślnie rzuca gotowy wskaźnik jako % (np. ARCC = 10.25, AAPL = 0.4)
+             div_yield_pct = float(div_yield_decimal)
+             
+    except Exception:
+        div_yield_pct = 0.0
+        
+    return rf_rate_pct, div_yield_pct
+
+def fetch_and_calculate_iv(symbol, option_type, period, risk_free_rate_pct, div_yield_pct, min_strike_pct, max_strike_pct):
+    # --- Convert inputs BACK to decimals for JAX Math ---
+    risk_free_rate = risk_free_rate_pct / 100.0
+    div_yield = div_yield_pct / 100.0
+    
     try:
         ticker = yf.Ticker(symbol)
         spot_price = ticker.fast_info.last_price
@@ -70,6 +101,7 @@ def fetch_and_calculate_iv(symbol, option_type, period, risk_free_rate, div_yiel
     O_arr = jnp.array(df['otype_val'].values, dtype=jnp.float32)
     
     ivs_jax = solve_iv_vectorized(S_arr, K_arr, T_arr, r_arr, P_arr, O_arr, q=div_yield)
+    delta_jax, gamma_jax, vega_jax, theta_jax = vectorized_greeks(S_arr, K_arr, T_arr, r_arr, ivs_jax, div_yield, O_arr)
     
     ivs = np.array(ivs_jax)
     valid = (ivs > 0.001) & (ivs < 4.99)
@@ -77,7 +109,12 @@ def fetch_and_calculate_iv(symbol, option_type, period, risk_free_rate, div_yiel
     surface_data = pd.DataFrame({
         "ivs": ivs[valid] * 100, # Display in %
         "strike": np.array(K_arr)[valid],
-        "dtes": np.array(T_arr)[valid]
+        "dtes": np.array(T_arr)[valid],
+        "delta": np.array(delta_jax)[valid],
+        "gamma": np.array(gamma_jax)[valid],
+        "vega": np.array(vega_jax)[valid],
+        "theta": np.array(theta_jax)[valid],
+        "price": np.array(P_arr)[valid]
     })
     
     return surface_data, spot_price, None
