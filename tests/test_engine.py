@@ -157,6 +157,23 @@ def test_calculate_all_greeks():
     assert np.isclose(g_call["rho"], rho_numerical, atol=1e-4)
 
 
+def test_american_greeks_in_exercise_region():
+    greeks = calculate_all_greeks(
+        50, 100, 1, 0.05, 0.2, otype=-1, model="bjerksund_stensland",
+    )
+    assert greeks["delta"] == pytest.approx(-1, abs=1e-6)
+    for name in ("gamma", "vega", "theta", "rho"):
+        assert greeks[name] == pytest.approx(0, abs=1e-6)
+
+
+def test_american_greeks_reduce_to_bs_without_dividends():
+    args = (100, 105, 0.5, 0.04, 0.3)
+    analytical = calculate_all_greeks(*args)
+    numerical = calculate_all_greeks(*args, model="bjerksund_stensland")
+    for name in analytical:
+        assert numerical[name] == pytest.approx(analytical[name], rel=1e-4, abs=1e-6)
+
+
 def test_solve_iv_black_scholes_vectorized():
     """
     Test vectorized IV recovery across an array of 50 option contracts with known volatilities.
