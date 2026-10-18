@@ -1,6 +1,12 @@
 import numpy as np
 import pytest
-from api.engine import black_scholes_price, black_scholes_vega, bjerksund_stensland_price, calculate_all_greeks
+from api.engine import (
+    black_scholes_price,
+    black_scholes_vega,
+    bjerksund_stensland_price,
+    calculate_all_greeks,
+    solve_iv_robust,
+)
 
 
 def test_black_scholes_benchmark():
@@ -149,3 +155,59 @@ def test_calculate_all_greeks():
     rho_numerical = ((p_up - p_down) / (2.0 * eps_r)) / 100.0
 
     assert np.isclose(g_call["rho"], rho_numerical, atol=1e-4)
+
+
+def test_solve_iv_black_scholes_vectorized():
+    """
+    Test vectorized IV recovery across an array of 50 option contracts with known volatilities.
+    """
+    np.random.seed(42)
+    N = 50
+    S = np.full(N, 100.0)
+    K = np.random.uniform(85.0, 115.0, N)
+    T = np.random.uniform(0.2, 1.5, N)
+    r = np.full(N, 0.04)
+    q = np.full(N, 0.01)
+    true_sigmas = np.random.uniform(0.15, 0.50, N)
+    otypes = np.random.choice([1.0, -1.0], size=N)
+
+    prices = black_scholes_price(S, K, T, r, true_sigmas, q=q, otype=otypes)
+    recovered_sigmas = solve_iv_robust(S, K, T, r, prices, otypes, q=q, model="black_scholes")
+
+    assert np.allclose(recovered_sigmas, true_sigmas, atol=1e-3)
+
+
+def test_solve_iv_american_bjerksund_stensland():
+    """
+    Test IV recovery for American Put and Call options using Bjerksund-Stensland model.
+    """
+    S, K, T, r, q = 100.0, 95.0, 0.5, 0.05, 0.02
+    true_sigma_put = 0.22
+    true_sigma_call = 0.28
+
+    p_mkt = bjerksund_stensland_price(S, K, T, r, true_sigma_put, q=q, otype=-1.0)
+    c_mkt = bjerksund_stensland_price(S, K, T, r, true_sigma_call, q=q, otype=1.0)
+
+    rec_put = solve_iv_robust(S, K, T, r, p_mkt, -1.0, q=q, model="bjerksund_stensland")
+    rec_call = solve_iv_robust(S, K, T, r, c_mkt, 1.0, q=q, model="bjerksund_stensland")
+
+    assert np.isclose(rec_put, true_sigma_put, atol=1e-3)
+    assert np.isclose(rec_call, true_sigma_call, atol=1e-3)
+
+
+def test_solve_iv_arbitrage_protection_and_low_vega():
+    """
+    Verify that:
+    1. Low-Vega OTM contract converges smoothly without exploding.
+    2. Prices violating no-arbitrage bounds (below intrinsic) safely return NaN.
+    """
+    # 1. Low-Vega realistic OTM call (K/S = 1.15, T = 0.1)
+    S, K, T, r, q, true_sig = 100.0, 115.0, 0.1, 0.05, 0.0, 0.30
+    mkt = black_scholes_price(S, K, T, r, true_sig, q=q, otype=1.0)
+    rec = solve_iv_robust(S, K, T, r, mkt, 1.0, q=q)
+    assert np.isclose(rec, true_sig, atol=1e-3)
+
+    # 2. Arbitrage violation: Call price of 0.01 for S=100, K=70 (intrinsic is ~30$)
+    bad_price = 0.01
+    rec_bad = solve_iv_robust(100.0, 70.0, 1.0, 0.05, bad_price, 1.0)
+    assert np.isnan(rec_bad)

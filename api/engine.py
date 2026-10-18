@@ -166,9 +166,74 @@ def calculate_all_greeks(S, K, T, r, sigma, q=0.0, otype=1.0):
     rho = (otype * K * T * df_r * ndtr(otype * d2)) / 100.0
 
     return {
-       "delta": delta,
-       "gamma": gamma,
+        "delta": delta,
+        "gamma": gamma,
         "vega": vega_pct,
         "theta": theta,
         "rho": rho,
     }
+
+
+def solve_iv_robust(
+    S,
+    K,
+    T,
+    r,
+    market_price,
+    otypes,
+    q=0.0,
+    model="black_scholes",
+    max_iter=15,
+    tol=1e-4,
+):
+    """
+    Vectorized, robust Implied Volatility (IV) solver with Levenberg-Marquardt damping
+    and a Brenner-Subrahmanyam starting point.
+    Protected against Vega collapse (V -> 0) for deep OTM/ITM strikes and short maturities T.
+    """
+    S = np.asarray(S, dtype=np.float64)
+    K = np.asarray(K, dtype=np.float64)
+    T = np.maximum(np.asarray(T, dtype=np.float64), 1e-5)
+    r = np.asarray(r, dtype=np.float64)
+    q = np.asarray(q, dtype=np.float64)
+    P_mkt = np.asarray(market_price, dtype=np.float64)
+    otypes = np.asarray(otypes, dtype=np.float64)
+
+    if model == "bjerksund_stensland":
+        intrinsic = np.maximum(0.0, otypes * (S - K))
+    else:
+        intrinsic = np.maximum(0.0, otypes * (S * np.exp(-q * T) - K * np.exp(-r * T)))
+
+    valid_mask = (P_mkt > (intrinsic + 1e-4)) & (P_mkt > 0.0)
+
+    call_mask = otypes > 0
+    valid_mask = valid_mask & np.where(call_mask, P_mkt < S, P_mkt < K)
+
+    sigma_init = np.sqrt(2.0 * np.pi / T) * (P_mkt / S)
+    sigma = np.clip(sigma_init, 0.10, 2.50)
+
+    pricing_func = (
+        bjerksund_stensland_price if model == "bjerksund_stensland" else black_scholes_price
+    )
+
+    for _ in range(max_iter):
+        p_calc = pricing_func(S, K, T, r, sigma, q=q, otype=otypes)
+        diff = p_calc - P_mkt
+
+        converged = np.abs(diff) < tol
+        if np.all(converged[valid_mask]):
+            break
+
+        v = black_scholes_vega(S, K, T, r, sigma, q=q)
+
+        damping = 1e-6 + 1e-3 * np.abs(diff)
+        step = (diff * v) / (v**2 + damping)
+
+        step_clipped = np.clip(step, -0.4, 0.4)
+        sigma = np.clip(sigma - step_clipped, 0.001, 5.0)
+
+    sigma = np.where(valid_mask, sigma, np.nan)
+
+    if np.ndim(market_price) == 0:
+        return float(sigma.item())
+    return sigma
