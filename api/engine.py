@@ -127,3 +127,48 @@ def bjerksund_stensland_price(S, K, T, r, sigma, q=0.0, otype=1.0):
     if np.isscalar(S) and np.isscalar(K) and np.isscalar(T) and np.isscalar(sigma):
         return float(prices[0])
     return prices
+
+def calculate_all_greeks(S, K, T, r, sigma, q=0.0, otype=1.0):
+    """
+    Calculate analytical Greeks
+    """
+    S = np.asarray(S, dtype=np.float64)
+    K = np.asarray(K, dtype=np.float64)
+    T = np.maximum(np.asarray(T, dtype=np.float64), 1e-6)
+    sigma = np.maximum(np.asarray(sigma, dtype=np.float64), 1e-6)
+    r = np.asarray(r, dtype=np.float64)
+    q = np.asarray(q, dtype=np.float64)
+    otype = np.asarray(otype, dtype=np.float64)
+
+    d1, d2 = calc_d1_d2(S, K, T, r, sigma, q)
+
+    df_q = np.exp(-q * T)
+    df_r = np.exp(-r * T)
+    sqrt_T = np.sqrt(T)
+    pdf_d1 = np.exp(-0.5 * d1**2) / np.sqrt(2.0 * np.pi)
+
+    # 1. Delta
+    delta = otype * df_q * ndtr(otype * d1)
+
+    # 2. Gamma 
+    gamma = df_q * pdf_d1 / (S * sigma * sqrt_T)
+
+    # 3. Vega 
+    vega_pct = (S * df_q * pdf_d1 * sqrt_T) / 100.0
+
+    # 4. Theta 
+    term1 = -(S * sigma * df_q * pdf_d1) / (2.0 * sqrt_T)
+    term2 = otype * r * K * df_r * ndtr(otype * d2)
+    term3 = otype * q * S * df_q * ndtr(otype * d1)
+    theta = (term1 - term2 + term3) / 365.0
+
+    # 5. Rho
+    rho = (otype * K * T * df_r * ndtr(otype * d2)) / 100.0
+
+    return {
+       "delta": delta,
+       "gamma": gamma,
+        "vega": vega_pct,
+        "theta": theta,
+        "rho": rho,
+    }

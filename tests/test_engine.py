@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from api.engine import black_scholes_price, black_scholes_vega, bjerksund_stensland_price
+from api.engine import black_scholes_price, black_scholes_vega, bjerksund_stensland_price, calculate_all_greeks
 
 
 def test_black_scholes_benchmark():
@@ -116,3 +116,36 @@ def test_bjerksund_stensland_deep_itm_put():
 
     assert p_amer >= intrinsic
     assert np.isclose(p_amer, intrinsic, atol=1e-4)
+
+def test_calculate_all_greeks():
+    """
+    Test analytical Greeks (Delta, Gamma, Vega, Theta, Rho) against theoretical properties and numerical finite differences.
+    """
+    S, K, T, r, sigma, q = 100.0, 100.0, 1.0, 0.05, 0.2, 0.02
+
+    g_call = calculate_all_greeks(S, K, T, r, sigma, q=q, otype=1.0)
+    g_put = calculate_all_greeks(S, K, T, r, sigma, q=q, otype=-1.0)
+
+    # 1. Własności Delty
+    assert 0.0 < g_call["delta"] < 1.0
+    assert -1.0 < g_put["delta"] < 0.0
+    # Put-Call Delta Parity: Delta_Call - Delta_Put == exp(-q * T)
+    assert np.isclose(g_call["delta"] - g_put["delta"], np.exp(-q * T), atol=1e-5)
+
+    # 2. Gamma i Vega są dodatnie i identyczne dla Call i Put
+    assert g_call["gamma"] > 0
+    assert np.isclose(g_call["gamma"], g_put["gamma"], atol=1e-6)
+    assert g_call["vega"] > 0
+    assert np.isclose(g_call["vega"], g_put["vega"], atol=1e-6)
+
+    # 3. Theta jest ujemna (upływ czasu pomniejsza wartość opcji)
+    assert g_call["theta"] < 0
+    assert g_put["theta"] < 0
+
+    # 4. Sprawdzenie analitycznego Rho numeryczną pochodną dPrice / dr (na 1% zmianystopy: / 100)
+    eps_r = 1e-4
+    p_up = black_scholes_price(S, K, T, r + eps_r, sigma, q=q, otype=1.0)
+    p_down = black_scholes_price(S, K, T, r - eps_r, sigma, q=q, otype=1.0)
+    rho_numerical = ((p_up - p_down) / (2.0 * eps_r)) / 100.0
+
+    assert np.isclose(g_call["rho"], rho_numerical, atol=1e-4)
