@@ -128,10 +128,13 @@ def bjerksund_stensland_price(S, K, T, r, sigma, q=0.0, otype=1.0):
         return float(prices[0])
     return prices
 
-def calculate_all_greeks(S, K, T, r, sigma, q=0.0, otype=1.0):
+def calculate_all_greeks(S, K, T, r, sigma, q=0.0, otype=1.0, model="black_scholes"):
     """
-    Calculate analytical Greeks
+    Calculate Greeks for the selected model. American Greeks use central finite
+    differences. Vega/rho are per percentage point; theta is per calendar day.
     """
+    if model not in ("black_scholes", "bjerksund_stensland"):
+        raise ValueError(f"Invalid model: '{model}'")
     S = np.asarray(S, dtype=np.float64)
     K = np.asarray(K, dtype=np.float64)
     T = np.maximum(np.asarray(T, dtype=np.float64), 1e-6)
@@ -139,6 +142,24 @@ def calculate_all_greeks(S, K, T, r, sigma, q=0.0, otype=1.0):
     r = np.asarray(r, dtype=np.float64)
     q = np.asarray(q, dtype=np.float64)
     otype = np.asarray(otype, dtype=np.float64)
+
+    if model == "bjerksund_stensland":
+        def price(s=S, t=T, vol=sigma, rate=r):
+            return bjerksund_stensland_price(s, K, t, rate, vol, q=q, otype=otype)
+
+        ds = np.maximum(np.abs(S) * 1e-4, 1e-6)
+        dv = np.minimum(1e-4, sigma * 0.5)
+        dt = np.minimum(1e-4, T * 0.5)
+        dr = 1e-5
+        base = price()
+        up, down = price(s=S + ds), price(s=S - ds)
+        return {
+            "delta": (up - down) / (2 * ds),
+            "gamma": (up - 2 * base + down) / ds**2,
+            "vega": (price(vol=sigma + dv) - price(vol=sigma - dv)) / (2 * dv * 100),
+            "theta": (price(t=T - dt) - price(t=T + dt)) / (2 * dt * 365),
+            "rho": (price(rate=r + dr) - price(rate=r - dr)) / (2 * dr * 100),
+        }
 
     d1, d2 = calc_d1_d2(S, K, T, r, sigma, q)
 
