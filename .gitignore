@@ -39,3 +39,5 @@ venv.bak/
 # Jupyter Notebook
 .ipynb_checkpoints
 
+
+.vercel/

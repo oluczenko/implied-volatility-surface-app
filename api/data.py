@@ -10,6 +10,21 @@ import yfinance as yf
 from .engine import calculate_all_greeks, solve_iv_robust
 
 
+class NoOptionsError(ValueError):
+    """No contracts match the requested filters or produce a usable IV."""
+
+
+class MarketDataError(ValueError):
+    """The market data provider failed or returned missing/invalid inputs."""
+
+
+def _report_warning(message: str, diagnostics: list[str] | None) -> None:
+    if diagnostics is None:
+        warnings.warn(message, UserWarning, stacklevel=3)
+    else:
+        diagnostics.append(message)
+
+
 def fetch_raw_options(
     symbol: str,
     option_type: Literal["call", "put", "otm"] = "otm",
@@ -19,6 +34,7 @@ def fetch_raw_options(
     max_strike_pct: float = 1.30,
     allow_last_price: bool = True,
     max_trade_age_days: float = 4,
+    diagnostics: list[str] | None = None,
 ):
     """Fetch quotes and market inputs (rates as decimals, T as ACT/365 years).
 
@@ -38,9 +54,12 @@ def fetch_raw_options(
     if not np.isfinite(max_trade_age_days) or max_trade_age_days <= 0:
         raise ValueError("Invalid maximum trade age")
     ticker = yf.Ticker(symbol)
-    expirations = ticker.options
+    try:
+        expirations = ticker.options
+    except Exception as exc:
+        raise MarketDataError(f"Failed to fetch expirations for '{symbol}'") from exc
     if not expirations:
-        raise ValueError(f"No option chains available for symbol: '{symbol}'")
+        raise NoOptionsError(f"No option chains available for symbol: '{symbol}'")
 
     # Assume US equity expiry at 16:00 New York, not AM index settlement.
     market_tz = ZoneInfo("America/New_York")
@@ -81,23 +100,25 @@ def fetch_raw_options(
             dividend_source = "trailing"
             if forward_dividend is not None:
                 if not np.isfinite(forward_dividend) or forward_dividend < 0:
-                    raise ValueError(f"Invalid forward dividend data for '{symbol}'")
+                    raise MarketDataError(f"Invalid forward dividend data for '{symbol}'")
                 dividend_source = "forward"
             if spot_price is None or not np.isfinite(spot_price) or spot_price <= 0:
-                raise ValueError(f"Missing valid spot price in option chain for '{symbol}'")
+                raise MarketDataError(f"Missing valid spot price in option chain for '{symbol}'")
             if forward_dividend is not None:
                 dividend_yield = forward_dividend / spot_price
             elif dividend_yield is None:
                 dividend_yield = 0.0
                 dividend_source = "assumed_zero"
-                warnings.warn(f"Missing dividend data for '{symbol}'; assuming q=0.",
-                              UserWarning, stacklevel=2)
+                _report_warning(f"Missing dividend data for '{symbol}'; assuming q=0.", diagnostics)
             if not np.isfinite(dividend_yield) or dividend_yield < 0:
-                raise ValueError(f"Missing dividend data for '{symbol}'")
+                raise MarketDataError(f"Missing dividend data for '{symbol}'")
 
-            treasury_yield = yf.Ticker("^TNX").fast_info.last_price
+            try:
+                treasury_yield = yf.Ticker("^TNX").fast_info.last_price
+            except Exception as exc:
+                raise MarketDataError("Failed to fetch ^TNX yield") from exc
             if treasury_yield is None or not np.isfinite(treasury_yield) or treasury_yield <= 0:
-                raise ValueError("Missing valid ^TNX yield")
+                raise MarketDataError("Missing valid ^TNX yield")
             metrics = {
                 "symbol": symbol.upper(),
                 "spot_price": spot_price,
@@ -164,19 +185,19 @@ def fetch_raw_options(
 
     if not frames:
         if chain_errors and successful_chains == 0:
-            raise ValueError(f"Failed to fetch option chains for '{symbol}'") from chain_errors[-1]
-        raise ValueError(f"No usable option prices matched the criteria for symbol: '{symbol}'")
+            raise MarketDataError(f"Failed to fetch option chains for '{symbol}'") from chain_errors[-1]
+        raise NoOptionsError(f"No usable option prices matched the criteria for symbol: '{symbol}'")
 
     df = pd.concat(frames, ignore_index=True)[
         ["expiration", "dte_days", "T", "strike", "bid", "ask", "midPrice", "otype",
          "price_source", "lastTradeDate"]
     ]
     if (df["price_source"] == "last_trade").any():
-        warnings.warn("Using last-trade estimates for some options; prices may be stale "
-                      "relative to spot and are not EOD quotes.", UserWarning, stacklevel=2)
+        _report_warning("Using last-trade estimates for some options; prices may be stale "
+                        "relative to spot and are not EOD quotes.", diagnostics)
     if chain_errors:
-        warnings.warn(f"Skipped {len(chain_errors)} failed option-chain requests for '{symbol}'.",
-                      UserWarning, stacklevel=2)
+        _report_warning(f"Skipped {len(chain_errors)} failed option-chain requests for '{symbol}'.",
+                        diagnostics)
     return df, metrics
 
 
@@ -190,6 +211,7 @@ def build_surface_dataframe(
     max_strike_pct: float = 1.30,
     allow_last_price: bool = True,
     max_trade_age_days: float = 4,
+    diagnostics: list[str] | None = None,
 ):
     """Fetch quotes, solve IV, and calculate Greeks for the selected model."""
     if model not in ("black_scholes", "bjerksund_stensland"):
@@ -203,6 +225,7 @@ def build_surface_dataframe(
         max_strike_pct=max_strike_pct,
         allow_last_price=allow_last_price,
         max_trade_age_days=max_trade_age_days,
+        diagnostics=diagnostics,
     )
     spot = metrics["spot_price"]
     r = metrics["risk_free_rate"]
@@ -221,7 +244,7 @@ def build_surface_dataframe(
 
     df = df.loc[np.isfinite(df["iv"]) & (df["iv"] > 1e-4) & (df["iv"] < 5)].copy()
     if df.empty:
-        raise ValueError(f"Failed to resolve implied volatility for any usable contracts of '{symbol}'.")
+        raise NoOptionsError(f"Failed to resolve implied volatility for any usable contracts of '{symbol}'.")
 
     greeks = calculate_all_greeks(
         S=spot,

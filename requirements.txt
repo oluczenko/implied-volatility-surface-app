@@ -1,8 +1,1 @@
-streamlit
-yfinance
-pandas
-jax
-jaxlib
-plotly
-numpy
-scipy
+-r requirements-api.txt
