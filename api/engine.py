@@ -211,6 +211,7 @@ def solve_iv_robust(
     Vectorized, robust Implied Volatility (IV) solver with Levenberg-Marquardt damping
     and a Brenner-Subrahmanyam starting point.
     Protected against Vega collapse (V -> 0) for deep OTM/ITM strikes and short maturities T.
+    Returns NaN for invalid quotes or prices not matched within tol.
     """
     S = np.asarray(S, dtype=np.float64)
     K = np.asarray(K, dtype=np.float64)
@@ -253,7 +254,10 @@ def solve_iv_robust(
         step_clipped = np.clip(step, -0.4, 0.4)
         sigma = np.clip(sigma - step_clipped, 0.001, 5.0)
 
-    sigma = np.where(valid_mask, sigma, np.nan)
+    # Recheck after the final update, including when the iteration limit is hit.
+    final_price = pricing_func(S, K, T, r, sigma, q=q, otype=otypes)
+    converged = np.isfinite(final_price) & (np.abs(final_price - P_mkt) <= tol)
+    sigma = np.where(valid_mask & converged, sigma, np.nan)
 
     if np.ndim(market_price) == 0:
         return float(sigma.item())

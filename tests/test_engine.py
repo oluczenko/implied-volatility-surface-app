@@ -228,3 +228,20 @@ def test_solve_iv_arbitrage_protection_and_low_vega():
     bad_price = 0.01
     rec_bad = solve_iv_robust(100.0, 70.0, 1.0, 0.05, bad_price, 1.0)
     assert np.isnan(rec_bad)
+
+
+@pytest.mark.parametrize("model,pricing", [
+    ("black_scholes", black_scholes_price),
+    ("bjerksund_stensland", bjerksund_stensland_price),
+])
+def test_solver_rejects_unconverged_results(model, pricing):
+    # With no iterations, the first quote matches the initial lower bound;
+    # the second needs refinement and must not return its initial guess as IV.
+    strikes = np.array([120.0, 100.0])
+    prices = pricing(100, strikes, 1, 0.04, np.array([0.1, 0.8]))
+    ivs = solve_iv_robust(100, strikes, 1, 0.04, prices, 1, model=model, max_iter=0)
+    assert ivs[0] == pytest.approx(0.1)
+    assert np.isnan(ivs[1])
+
+    scalar_iv = solve_iv_robust(100, 100, 1, 0.04, prices[1], 1, model=model, max_iter=0)
+    assert np.isnan(scalar_iv)
