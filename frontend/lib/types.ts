@@ -12,11 +12,23 @@ export interface Contract {
   lastTradeDate: string | null;
   iv: number;
   iv_pct: number;
+  iv_bid: number | null;
+  iv_ask: number | null;
   delta: number | null;
   gamma: number | null;
   vega: number | null;
   theta: number | null;
   rho: number | null;
+}
+export interface QualitySummary {
+  received_contracts: number;
+  excluded_by_filters: number;
+  rejected_quotes: number;
+  eligible_contracts: number;
+  invalid_or_unidentifiable_prices: number;
+  unsupported_model: number;
+  unresolved_iv: number;
+  solved_contracts: number;
 }
 export interface SurfaceData {
   generated_at: string;
@@ -30,4 +42,5 @@ export interface SurfaceData {
   };
   contracts: Contract[];
   warnings: string[];
+  quality: QualitySummary | null;
 }

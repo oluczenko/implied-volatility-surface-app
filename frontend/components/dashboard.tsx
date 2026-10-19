@@ -31,15 +31,19 @@ export default function Dashboard() {
   const [error, setError] = useState("");
   const [expiration, setExpiration] = useState(expirations(demo.contracts)[1] ?? demo.contracts[0].expiration);
   const [showPoints, setShowPoints] = useState(false);
+  const [includeEstimates, setIncludeEstimates] = useState(true);
   const [axisMode, setAxisMode] = useState<"strike" | "moneyness">("strike");
   const controller = useRef<AbortController | null>(null);
   const requestId = useRef(0);
   useEffect(() => () => controller.current?.abort(), []);
 
-  const dates = useMemo(() => expirations(dataset.contracts), [dataset]);
-  const activeExpiry = dates.includes(expiration) ? expiration : dates[0];
+  const visibleDataset = useMemo(() => ({ ...dataset,
+    contracts: includeEstimates ? dataset.contracts : dataset.contracts.filter((c) => c.price_source === "midpoint"),
+  }), [dataset, includeEstimates]);
+  const dates = useMemo(() => expirations(visibleDataset.contracts), [visibleDataset]);
+  const activeExpiry = dates.includes(expiration) ? expiration : dates[0] ?? "";
   const lastTrades = dataset.contracts.filter((c) => c.price_source === "last_trade").length;
-  const selectedCount = dataset.contracts.filter((c) => c.expiration === activeExpiry).length;
+  const selectedCount = visibleDataset.contracts.filter((c) => c.expiration === activeExpiry).length;
   const oldestTrade = dataset.contracts.filter((c) => c.price_source === "last_trade" && c.lastTradeDate).map((c) => c.lastTradeDate!).sort()[0];
 
   async function fetchData(event: FormEvent<HTMLFormElement>) {
@@ -59,7 +63,7 @@ export default function Dashboard() {
       const response = await fetch(`/api/surface?${query}`, { signal: abort.signal, cache: "no-store" });
       const payload = await response.json().catch(() => null);
       if (!response.ok) {
-        if (response.status === 404) throw new Error("No usable options matched these filters. Try another ticker, a wider strike range, or allow last-trade estimates.");
+        if (response.status === 404) throw new Error(payload?.detail?.message || "No usable options matched these filters. Try another ticker, a wider strike range, or allow last-trade estimates.");
         if (response.status === 422) throw new Error("Check the ticker and filter values, then try again.");
         throw new Error(payload?.detail?.message || "Market data is unavailable right now. Your previous view has been kept.");
       }
@@ -80,7 +84,7 @@ export default function Dashboard() {
   function restoreDemo() {
     ++requestId.current;
     controller.current?.abort();
-    setDataset(demo); setIsSnapshot(true); setLoading(false); setError("");
+    setDataset(demo); setIsSnapshot(true); setLoading(false); setError(""); setIncludeEstimates(true);
     setSymbol("AAPL"); setModel(demo.model); setKind("otm"); setCount(6);
     setMinStrike(70); setMaxStrike(130); setAllowLast(true);
     setExpiration(expirations(demo.contracts)[1] ?? demo.contracts[0].expiration);
@@ -107,9 +111,17 @@ export default function Dashboard() {
         <button type="button" className="button button-outline export-button" onClick={exportCsv}><svg width="16" height="16" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 3v10m-4-4 4 4 4-4M4 14v3h12v-3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>Export CSV</button>
       </section>
 
-      <div className="dataset-bar"><div className="dataset-description"><span className={`badge ${isSnapshot ? "badge-snapshot" : "badge-fetched"}`}><span className="status-dot" />{isSnapshot ? "SAVED SNAPSHOT" : "FETCHED DATA"}</span><strong>{dataset.metrics.symbol}</strong><span className="bar-separator" /><span>{modelName(dataset.model)}</span><span className="bar-separator" /><span>{dates.length} expirations</span></div><span className="dataset-date">{isSnapshot ? "Captured" : "Fetched"} {dateLabel(dataset.generated_at)} · {timeLabel(dataset.generated_at)} UTC</span></div>
+      <div className="dataset-bar"><div className="dataset-description"><span className={`badge ${isSnapshot ? "badge-snapshot" : "badge-fetched"}`}><span className="status-dot" />{isSnapshot ? "SAVED SNAPSHOT" : "FETCHED DATA"}</span><strong>{dataset.metrics.symbol}</strong><span className="bar-separator" /><span>{modelName(dataset.model)}</span><span className="bar-separator" /><span>{expirations(dataset.contracts).length} expirations</span></div><span className="dataset-date">{isSnapshot ? "Captured" : "Fetched"} {dateLabel(dataset.generated_at)} · {timeLabel(dataset.generated_at)} UTC</span></div>
 
-      <section className="metrics" aria-label="Market inputs"><Metric label="UNDERLYING PRICE" value={`$${number(dataset.metrics.spot_price)}`} note={dataset.metrics.symbol + " · Yahoo Finance"} /><Metric label="RISK-FREE RATE" value={`${number(dataset.metrics.risk_free_rate * 100)}%`} note="10-year Treasury proxy" /><Metric label="DIVIDEND YIELD" value={`${number(dataset.metrics.dividend_yield * 100)}%`} note={dataset.metrics.dividend_source === "assumed_zero" ? "Assumed zero · data unavailable" : `${dataset.metrics.dividend_source === "forward" ? "Forward" : "Trailing annual"} dividend yield`} /><Metric label="OBSERVED CONTRACTS" value={String(dataset.contracts.length)} note={`${dates.length} expirations · ${lastTrades ? `${lastTrades} last-trade estimates` : "bid/ask midpoints"}`} /></section>
+      <section className="metrics" aria-label="Market inputs"><Metric label="UNDERLYING PRICE" value={`$${number(dataset.metrics.spot_price)}`} note={dataset.metrics.symbol + " · Yahoo Finance"} /><Metric label="RISK-FREE RATE" value={`${number(dataset.metrics.risk_free_rate * 100)}%`} note="10-year Treasury proxy" /><Metric label="DIVIDEND YIELD" value={`${number(dataset.metrics.dividend_yield * 100)}%`} note={dataset.metrics.dividend_source === "assumed_zero" ? "Assumed zero · data unavailable" : `${dataset.metrics.dividend_source === "forward" ? "Forward" : "Trailing annual"} dividend yield`} /><Metric label="OBSERVED CONTRACTS" value={String(dataset.contracts.length)} note={`${dataset.contracts.length - lastTrades} midpoints · ${lastTrades} last-trade estimates`} /></section>
+
+      <section className="quality-summary" aria-label="Data quality summary">
+        <p><strong>{dataset.contracts.length - lastTrades} bid/ask midpoints</strong><span> · </span><strong className="estimate-label">{lastTrades} last-trade estimates</strong><span> · {visibleDataset.contracts.length} shown</span></p>
+        <label className="checkbox-label"><input type="checkbox" checked={includeEstimates} onChange={(e) => setIncludeEstimates(e.target.checked)} />Include last-trade estimates in charts</label>
+        {dataset.quality ? <p className="quality-counts">Received {dataset.quality.received_contracts} · Outside selection {dataset.quality.excluded_by_filters} · Rejected quotes {dataset.quality.rejected_quotes} · Eligible {dataset.quality.eligible_contracts} · No identifiable IV {dataset.quality.invalid_or_unidentifiable_prices} · Outside model domain {dataset.quality.unsupported_model} · Solver unresolved {dataset.quality.unresolved_iv} · Solved {dataset.quality.solved_contracts}</p>
+          : <p className="quality-counts">Solver counts are unavailable for this saved dataset.</p>}
+        <p className="quality-counts">Bid/ask IV bars show sensitivity to the quoted spread, not a confidence interval. Last trades have no bid/ask interval. Chart filtering does not change the CSV export.</p>
+      </section>
 
       <div className="explorer-grid">
         <aside className="panel controls-panel"><div className="panel-heading"><h2>Market selection</h2><span className="section-number">01</span></div>
@@ -132,20 +144,20 @@ export default function Dashboard() {
         <section className="panel surface-panel" aria-busy={loading}>
           <div className="chart-heading"><div><p className="eyebrow">VOLATILITY ACROSS STRIKE & MATURITY</p><h2>Implied volatility surface</h2></div><span className="subtle-tag">3D VIEW</span></div>
           <div className="chart-toolbar"><div className="segmented" role="group" aria-label="Surface horizontal axis"><button type="button" aria-pressed={axisMode === "strike"} className={axisMode === "strike" ? "active" : ""} onClick={() => setAxisMode("strike")}>Strike price</button><button type="button" aria-pressed={axisMode === "moneyness"} className={axisMode === "moneyness" ? "active" : ""} onClick={() => setAxisMode("moneyness")}>Log-moneyness</button></div><label className="checkbox-label points-toggle"><input type="checkbox" checked={showPoints} onChange={(e) => setShowPoints(e.target.checked)} />Show quotes</label></div>
-          <div className="surface-chart"><SurfaceChart dataset={dataset} points={showPoints} axisMode={axisMode} /></div>
+          <div className="surface-chart">{visibleDataset.contracts.length ? <SurfaceChart dataset={visibleDataset} points={showPoints} axisMode={axisMode} /> : <p className="empty-chart" role="status">No bid/ask midpoint observations are available. Include last-trade estimates to view this dataset.</p>}</div>
           {loading && <div className="chart-updating" role="status"><span className="spinner" />Fetching new data · previous view retained</div>}
           <div className="chart-footer"><span><span className="legend-line" />Spot strike</span><span>Drag to rotate <span className="footer-dot">·</span> Scroll to zoom</span></div>
         </section>
       </div>
 
       {error && <div className="error-banner" role="alert"><strong>Couldn’t update the surface.</strong><span>{error}</span><button type="button" aria-label="Dismiss error" onClick={() => setError("")}>×</button></div>}
-      <div className="sr-only" aria-live="polite">{loading ? "Fetching market data" : `Showing ${dataset.contracts.length} contracts for ${dataset.metrics.symbol}`}</div>
+      <div className="sr-only" aria-live="polite">{loading ? "Fetching market data" : `Showing ${visibleDataset.contracts.length} of ${dataset.contracts.length} contracts for ${dataset.metrics.symbol}`}</div>
 
       {(dataset.warnings.length > 0 || isSnapshot) && <details className="quality-note"><summary><span className="info-icon">i</span><span>{lastTrades ? "Last-trade estimates are included" : "About this dataset"}</span><span className="quality-caption">Data quality <span aria-hidden="true">⌄</span></span></summary><div><p>{isSnapshot && `This is a saved Yahoo Finance snapshot captured on ${dateLabel(dataset.generated_at)}. `}Fetched prices may be delayed. Response time is not the timestamp of each quote.</p>{dataset.warnings.map((warning, i) => <p key={i}>{warning}</p>)}{oldestTrade && <p>Oldest fallback trade: {dateLabel(oldestTrade)} · {timeLabel(oldestTrade)} UTC.</p>}</div></details>}
 
-      <section className="panel smile-panel"><div className="chart-heading"><div><p className="eyebrow">A CLOSER LOOK AT ONE EXPIRATION</p><h2>Volatility smile</h2></div><div className="expiry-control"><label htmlFor="smile-expiry">Expiration</label><select id="smile-expiry" value={activeExpiry} onChange={(e) => setExpiration(e.target.value)}>{dates.map((date) => <option key={date} value={date}>{dateLabel(date)}</option>)}</select></div></div><div className="smile-chart"><SmileChart dataset={dataset} expiration={activeExpiry} /></div><div className="chart-footer"><span><span className="legend-point" />{selectedCount} observed contracts</span><span>Hover over a point for price & Greeks</span></div></section>
+      <section className="panel smile-panel"><div className="chart-heading"><div><p className="eyebrow">A CLOSER LOOK AT ONE EXPIRATION</p><h2>Volatility smile</h2></div><div className="expiry-control"><label htmlFor="smile-expiry">Expiration</label><select id="smile-expiry" disabled={!dates.length} value={activeExpiry} onChange={(e) => setExpiration(e.target.value)}>{dates.map((date) => <option key={date} value={date}>{dateLabel(date)}</option>)}</select></div></div><div className="smile-chart">{visibleDataset.contracts.length ? <SmileChart dataset={visibleDataset} expiration={activeExpiry} /> : <p className="empty-chart">No observations match the chart filter.</p>}</div><div className="chart-footer"><span><span className="legend-point" />Midpoints <span className="legend-point legend-estimate" />Last trades · {selectedCount} contracts</span><span>Hover over a point for price & Greeks</span></div></section>
 
-      <section className="methodology" id="methodology"><div><p className="eyebrow">UNDER THE SURFACE</p><h2>A market view, with its assumptions in view.</h2></div><div className="method-cards"><article><span>01 / PRICES</span><h3>Quotes before estimates</h3><p>Valid bid/ask midpoints take priority. When enabled, recent last trades fill missing quotes and are explicitly flagged.</p></article><article><span>02 / MODELS</span><h3>One engine, two assumptions</h3><p>Black–Scholes assumes European exercise. Bjerksund–Stensland approximates American exercise. Both use a continuous dividend yield.</p></article><article><span>03 / INTERPOLATION</span><h3>Connect, without extrapolating</h3><p>The display linearly joins IV across strikes and maturities. Gaps outside each expiry’s strike range stay empty. This is not an arbitrage-free calibrated surface.</p></article></div></section>
+      <section className="methodology" id="methodology"><div><p className="eyebrow">UNDER THE SURFACE</p><h2>A market view, with its assumptions in view.</h2></div><div className="method-cards"><article><span>01 / PRICES</span><h3>Quotes before estimates</h3><p>Valid bid/ask midpoints take priority. When enabled, recent last trades fill missing quotes and are explicitly flagged.</p></article><article><span>02 / MODELS</span><h3>One engine, two assumptions</h3><p>Black–Scholes assumes European exercise. Bjerksund–Stensland approximates American exercise. Cases outside its supported domain are reported as unavailable. Both use a continuous dividend yield.</p></article><article><span>03 / INTERPOLATION</span><h3>Connect, without extrapolating</h3><p>The display linearly joins IV across strikes and maturities. Gaps outside each expiry’s strike range stay empty. This is not an arbitrage-free calibrated surface.</p></article></div></section>
       <footer className="page-footer"><a href="#" className="footer-brand">volsurface.</a><span>Educational options analytics. Not investment advice.</span><span>Python engine <span className="footer-dot">/</span> Plotly visualization</span></footer>
     </main>
   </>;

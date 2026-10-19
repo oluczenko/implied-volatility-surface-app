@@ -62,11 +62,24 @@ class Contract(BaseModel):
     lastTradeDate: datetime | None
     iv: float
     iv_pct: float
+    iv_bid: float | None = None
+    iv_ask: float | None = None
     delta: float | None
     gamma: float | None
     vega: float | None
     theta: float | None
     rho: float | None
+
+
+class QualitySummary(BaseModel):
+    received_contracts: int = Field(ge=0)
+    excluded_by_filters: int = Field(ge=0)
+    rejected_quotes: int = Field(ge=0)
+    eligible_contracts: int = Field(ge=0)
+    invalid_or_unidentifiable_prices: int = Field(ge=0)
+    unsupported_model: int = Field(default=0, ge=0)
+    unresolved_iv: int = Field(ge=0)
+    solved_contracts: int = Field(ge=0)
 
 
 class SurfaceResponse(BaseModel):
@@ -75,6 +88,7 @@ class SurfaceResponse(BaseModel):
     metrics: MarketMetrics
     contracts: list[Contract]
     warnings: list[str]
+    quality: QualitySummary | None = None
 
 
 @app.get("/api/health")
@@ -89,7 +103,7 @@ def surface(params: Annotated[SurfaceQuery, Query()]) -> SurfaceResponse:
         frame, metrics = build_surface_dataframe(**params.model_dump(), diagnostics=diagnostics)
     except NoOptionsError as exc:
         raise HTTPException(status_code=404, detail={
-            "code": "no_usable_options", "message": str(exc),
+            "code": "no_usable_options", "message": str(exc), "quality": exc.quality,
         }) from exc
     except MarketDataError as exc:
         logger.warning("Market data unavailable for %s: %s", params.symbol, exc)
@@ -103,4 +117,5 @@ def surface(params: Annotated[SurfaceQuery, Query()]) -> SurfaceResponse:
     return SurfaceResponse(
         generated_at=datetime.now(timezone.utc), model=params.model,
         metrics=MarketMetrics(**metrics), contracts=contracts, warnings=diagnostics,
+        quality=frame.attrs.get("quality"),
     )

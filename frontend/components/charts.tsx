@@ -17,8 +17,9 @@ export function SurfaceChart({ dataset, points, axisMode }: { dataset: SurfaceDa
     const convert = (strike: number) => axisMode === "strike" ? strike : Math.log(strike / metrics.spot_price);
     const raw: Data = { type: "scatter3d", mode: "markers", name: "Observed quotes",
       x: contracts.map((c) => convert(c.strike)), y: contracts.map((c) => c.T * 365), z: contracts.map((c) => c.iv_pct),
-      marker: { size: 2.5, color: "#204c49", opacity: 0.8 },
-      hovertemplate: "Observed quote<br>Strike axis: %{x:.3f}<br>Days: %{y:.1f}<br>IV: %{z:.2f}%<extra></extra>" };
+      marker: { size: 2.5, color: contracts.map((c) => c.price_source === "midpoint" ? "#148a78" : "#b77c24"), opacity: 0.8 },
+      customdata: contracts.map((c) => c.price_source === "midpoint" ? "Bid/ask midpoint" : "Last-trade estimate"),
+      hovertemplate: "%{customdata}<br>Strike axis: %{x:.3f}<br>Days: %{y:.1f}<br>IV: %{z:.2f}%<extra></extra>" };
     const result: Data[] = [];
     if (grid.x.length > 1 && grid.y.length > 1) result.push({ type: "surface", name: "Interpolated IV",
       x: grid.x.map(convert), y: grid.y, z: grid.z, colorscale: colors, opacity: 0.96,
@@ -49,9 +50,15 @@ export function SmileChart({ dataset, expiration }: { dataset: SurfaceData; expi
     return [{ type: "scatter", mode: "lines", name: "Linear interpolation", x: points.map((p) => p.strike), y: points.map((p) => p.iv),
       line: { color: "#148a78", width: 2.5, shape: "linear" }, hoverinfo: "skip" },
       { type: "scatter", mode: "markers", name: "Observed quotes", x: contracts.map((c) => c.strike), y: contracts.map((c) => c.iv_pct),
-        customdata: contracts.map((c) => [c.otype === 1 ? "Call" : "Put", c.midPrice, c.delta, c.gamma, c.vega, c.theta, c.price_source]),
-        marker: { size: 6, color: "#148a78", line: { color: "#fff", width: 1 } },
-        hovertemplate: "<b>%{customdata[0]} · $%{x:.2f}</b><br>IV: %{y:.2f}%<br>Price: $%{customdata[1]:.2f}<br>Delta: %{customdata[2]:.3f}<br>Gamma: %{customdata[3]:.4f}<br>Vega: %{customdata[4]:.3f}<br>Theta/day: %{customdata[5]:.3f}<br>Source: %{customdata[6]}<extra></extra>" }];
+        customdata: contracts.map((c) => [c.otype === 1 ? "Call" : "Put", c.midPrice, c.delta, c.gamma, c.vega, c.theta, c.price_source === "midpoint" ? "Bid/ask midpoint" : "Last-trade estimate",
+          c.iv_bid == null ? "unavailable" : `${(c.iv_bid * 100).toFixed(2)}%`,
+          c.iv_ask == null ? "unavailable" : `${(c.iv_ask * 100).toFixed(2)}%`]),
+        error_y: { type: "data", symmetric: false,
+          array: contracts.map((c) => c.iv_bid != null && c.iv_ask != null ? Math.max(0, c.iv_ask * 100 - c.iv_pct) : 0),
+          arrayminus: contracts.map((c) => c.iv_bid != null && c.iv_ask != null ? Math.max(0, c.iv_pct - c.iv_bid * 100) : 0),
+          color: "#81b5a6", thickness: 1, width: 3 },
+        marker: { size: 6, color: contracts.map((c) => c.price_source === "midpoint" ? "#148a78" : "#b77c24"), line: { color: "#fff", width: 1 } },
+        hovertemplate: "<b>%{customdata[0]} · $%{x:.2f}</b><br>IV: %{y:.2f}%<br>Price: $%{customdata[1]:.2f}<br>Delta: %{customdata[2]:.3f}<br>Gamma: %{customdata[3]:.4f}<br>Vega: %{customdata[4]:.3f}<br>Theta/day: %{customdata[5]:.3f}<br>Source: %{customdata[6]}<br>Bid IV: %{customdata[7]}<br>Ask IV: %{customdata[8]}<extra></extra>" }];
   }, [dataset, expiration]);
   const layout = useMemo<Partial<Layout>>(() => ({ paper_bgcolor: "transparent", plot_bgcolor: "transparent", font,
     margin: { l: 55, r: 20, t: 20, b: 50 }, showlegend: false, hovermode: "closest",

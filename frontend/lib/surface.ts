@@ -59,5 +59,25 @@ export function parseSurface(value: unknown): SurfaceData {
         ["midpoint", "last_trade"].includes(c.price_source))) {
     throw new Error("The server returned an invalid surface. Your previous view has been kept.");
   }
-  return d;
+  const quality = d.quality == null ? null : { ...d.quality, unsupported_model: d.quality.unsupported_model ?? 0 };
+  const countKeys = ["received_contracts", "excluded_by_filters", "rejected_quotes", "eligible_contracts",
+    "invalid_or_unidentifiable_prices", "unsupported_model", "unresolved_iv", "solved_contracts"] as const;
+  if (quality !== null && (typeof quality !== "object" || Array.isArray(quality) ||
+      countKeys.some((key) => !Number.isSafeInteger(quality[key]) || quality[key] < 0) ||
+      quality.received_contracts !== quality.excluded_by_filters + quality.rejected_quotes + quality.eligible_contracts ||
+      quality.eligible_contracts !== quality.invalid_or_unidentifiable_prices + quality.unsupported_model + quality.unresolved_iv + quality.solved_contracts ||
+      quality.solved_contracts !== d.contracts.length)) {
+    throw new Error("The server returned inconsistent quality counts. Your previous view has been kept.");
+  }
+  const contracts = d.contracts.map((c) => {
+    const iv_bid = c.iv_bid ?? null;
+    const iv_ask = c.iv_ask ?? null;
+    if ([iv_bid, iv_ask].some((v) => v !== null && (!Number.isFinite(v) || v < .001 || v > 5)) ||
+        (c.price_source === "last_trade" && (iv_bid !== null || iv_ask !== null)) ||
+        (iv_bid !== null && iv_ask !== null && iv_bid > iv_ask)) {
+      throw new Error("The server returned an invalid bid/ask IV interval. Your previous view has been kept.");
+    }
+    return { ...c, iv_bid, iv_ask };
+  });
+  return { ...d, contracts, quality };
 }

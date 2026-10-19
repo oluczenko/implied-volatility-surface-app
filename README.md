@@ -77,11 +77,40 @@ previous chart. There is no durable cache in this version.
 
 ## Data and model assumptions
 
-- Bid/ask midpoints take priority. Optional last-trade estimates require a valid
-  timestamp at most four calendar days old. Price source and warnings remain visible.
+- Positive bid/ask midpoints take priority, including locked quotes (`bid == ask`).
+  Optional last-trade estimates require a valid timestamp at most four calendar
+  days old. Price source and warnings remain visible.
 - The snapshot capture time and response time are **not** quote timestamps.
-- Black–Scholes assumes European exercise. Bjerksund–Stensland approximates
-  American early exercise. Both use a continuous dividend yield.
+- Black–Scholes assumes European exercise. Bjerksund–Stensland (1993) approximates
+  American early exercise. It is a single approximation, without a binomial
+  fallback or model blending. A collapsed/nonfinite exercise boundary returns
+  unavailable rather than a fabricated price. This implementation supports
+  nonnegative interest rates and dividend yields. Both models use continuous
+  dividend yield. Numerical Greeks remain approximations; an unsupported bump
+  yields a missing Greek and an explicit warning.
+- The IV solver combines damped iteration with an expanding-bracket Brent
+  fallback over 0.1%–500% IV, intersected with the approximation's supported
+  volatility domain. For a call this requires `sigma > max(q-r, 0)*sqrt(T)/2`;
+  for a put, `sigma > max(r-q, 0)*sqrt(T)/2`. This prevents a collapsed exercise
+  boundary, but does not guarantee approximation accuracy near that boundary.
+  Returned IVs reprice within an absolute price tolerance of 0.0001 **under the
+  selected model**, not an exact American benchmark.
+  Prices too close to the lower bound have no identifiable IV at this tolerance.
+- API responses include `quality` counts for received, excluded-by-selection,
+  rejected-quote, eligible, invalid/unidentifiable-price, unsupported-model,
+  unresolved-IV and solved contracts. `unsupported_model` is separate from
+  `unresolved_iv`; it identifies prices below the model's supported domain or
+  inputs where the approximation cannot evaluate the lower endpoint. Unresolved
+  IVs generate warnings. No-options (404) responses retain available counts in
+  `detail.quality`.
+- `iv_bid` and `iv_ask` are decimal volatilities, each nullable when no IV can be
+  identified at that endpoint. They are absent/null for last-trade estimates.
+  Smile error bars display complete bid/ask IV ranges; these measure sensitivity
+  to the quoted spread, not statistical confidence. CSV exports include both.
+- The chart-only last-trade toggle filters both charts without another request.
+  Midpoints are green and estimates amber. CSV always exports the full dataset.
+  Older snapshots remain compatible, with unavailable counters and intervals
+  explicitly shown as unavailable rather than reconstructed.
 - Dividend input prefers annual forward cash dividend / spot, then trailing yield.
   Missing dividend data is explicitly marked as an assumed zero.
 - The 10-year Treasury yield is a single rate proxy, not a maturity-matched curve.

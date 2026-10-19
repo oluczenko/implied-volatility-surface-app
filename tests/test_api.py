@@ -25,6 +25,11 @@ def pipeline(monkeypatch):
         "iv": 0.3, "iv_pct": 30, "delta": 0.5, "gamma": 0.03,
         "vega": 0.2, "theta": -0.04, "rho": np.nan,
     }])
+    frame.attrs["quality"] = {
+        "received_contracts": 5, "excluded_by_filters": 1, "rejected_quotes": 1,
+        "eligible_contracts": 3, "invalid_or_unidentifiable_prices": 1,
+        "unsupported_model": 0, "unresolved_iv": 1, "solved_contracts": 1,
+    }
     metrics = {"symbol": "AAPL", "spot_price": np.float64(100),
                "risk_free_rate": 0.04, "dividend_yield": 0,
                "dividend_source": "assumed_zero"}
@@ -55,6 +60,9 @@ def test_surface_json_and_defaults(client, pipeline):
     assert contract["lastTradeDate"] == "2026-10-19T15:45:00Z"
     assert contract["expiration"] == "2026-11-20"
     assert contract["iv"] == 0.3
+    assert contract["iv_bid"] is None and contract["iv_ask"] is None
+    assert payload["quality"]["unresolved_iv"] == 1
+    assert payload["quality"]["solved_contracts"] == len(payload["contracts"])
     args = pipeline.call_args.kwargs
     assert args["symbol"] == "AAPL"
     assert args["max_expirations"] == 4
@@ -120,3 +128,13 @@ def test_openapi_documents_contract(client):
     assert "/api/health" in schema["paths"]
     assert "/api/surface" in schema["paths"]
     assert "SurfaceResponse" in schema["components"]["schemas"]
+
+
+def test_no_options_error_preserves_quality_diagnostics(client, pipeline):
+    counts = {"received_contracts": 2, "excluded_by_filters": 0, "rejected_quotes": 0,
+              "eligible_contracts": 2, "invalid_or_unidentifiable_prices": 1,
+              "unsupported_model": 0, "unresolved_iv": 1, "solved_contracts": 0}
+    pipeline.side_effect = data.NoOptionsError("No resolvable contracts", counts)
+    response = client.get("/api/surface?symbol=AAPL")
+    assert response.status_code == 404
+    assert response.json()["detail"]["quality"] == counts

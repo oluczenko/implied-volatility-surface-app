@@ -245,3 +245,102 @@ def test_solver_rejects_unconverged_results(model, pricing):
 
     scalar_iv = solve_iv_robust(100, 100, 1, 0.04, prices[1], 1, model=model, max_iter=0)
     assert np.isnan(scalar_iv)
+
+
+@pytest.mark.parametrize("otype,r,q", [(-1, .04, 0.), (1, 0., .04)])
+def test_collapsed_american_boundary_is_unavailable_instead_of_zero(otype, r, q):
+    for vol in (.01, .02):
+        assert np.isnan(bjerksund_stensland_price(100, 100, 1, r, vol, q, otype))
+    # The valid part of the original approximation is still available.
+    assert np.isfinite(bjerksund_stensland_price(100, 100, 1, r, .03, q, otype))
+
+
+def test_pure_american_approximation_matches_1993_benchmark():
+    # Reference 1993 approximation, distinct from a more accurate American tree.
+    assert bjerksund_stensland_price(100, 100, 1, .05, .2, 0., -1.) == pytest.approx(5.9829739726, abs=1e-8)
+    vols = np.linspace(.03, .12, 80)
+    prices = bjerksund_stensland_price(100, 100, 1, .04, vols, 0., -1.)
+    assert np.all(np.isfinite(prices))
+    assert np.all(np.diff(prices) > 0)
+
+
+@pytest.mark.parametrize("model,pricing", [
+    ("black_scholes", black_scholes_price),
+    ("bjerksund_stensland", bjerksund_stensland_price),
+])
+def test_solver_brent_fallback_recovers_audited_low_vega_cases(model, pricing):
+    strikes = np.array([77.36066507489821, 123.31584132522323, 72.21551093066704])
+    times = np.array([.13830878328409027, .011336185863083902, .06344231557893351])
+    expected = np.array([.4349267647724759, 1.0073086235176538, 1.2234392245837478])
+    types = np.array([-1., 1., -1.])
+    prices = pricing(100, strikes, times, .042, expected, .02, types)
+    recovered = solve_iv_robust(100, strikes, times, .042, prices, types, .02, model)
+    assert np.allclose(recovered, expected, atol=1e-6)
+    assert np.allclose(pricing(100, strikes, times, .042, recovered, .02, types), prices, atol=1e-4)
+
+
+def test_low_volatility_american_iv_recovery_inside_domain():
+    price = bjerksund_stensland_price(100, 100, 1, .04, .03, 0., -1.)
+    assert solve_iv_robust(100, 100, 1, .04, price, -1., 0., "bjerksund_stensland") == pytest.approx(.03, abs=1e-5)
+
+
+def test_solver_preserves_broadcast_shape_and_rejects_invalid_inputs():
+    vols = np.array([[.2, .3], [.4, .5]])
+    prices = black_scholes_price(100, 100, 1, .04, vols)
+    recovered = solve_iv_robust(100, 100, 1, .04, prices, 1.)
+    assert recovered.shape == vols.shape
+    assert np.allclose(recovered, vols, atol=1e-5)
+    for kwargs in [{"T": 0}, {"S": -100}, {"otypes": 0}, {"market_price": np.nan}]:
+        params = dict(S=100, K=100, T=1, r=.04, market_price=5, otypes=1.)
+        assert np.isnan(solve_iv_robust(**(params | kwargs)))
+    with pytest.raises(ValueError, match="Invalid model"):
+        solve_iv_robust(100, 100, 1, .04, 5, 1., model="typo")
+
+
+def test_solver_respects_discounted_european_upper_bound():
+    # Price below spot but above discounted spot is still impossible for this call.
+    assert np.isnan(solve_iv_robust(100, 100, 1, .04, 95, 1., q=.1))
+
+
+def test_american_price_broadcasts_rates_and_handles_expiry():
+    rates = np.array([.01, .04])
+    prices = bjerksund_stensland_price(100, 100, 1, rates, .2)
+    assert prices.shape == (2,)
+    assert np.allclose(prices, black_scholes_price(100, 100, 1, rates, .2))
+    assert bjerksund_stensland_price(110, 100, 0, .04, .2) == 10
+    assert bjerksund_stensland_price(90, 100, 0, .04, .2, otype=-1) == 10
+
+
+def test_american_approximation_is_homogeneous_in_spot_and_strike():
+    base = bjerksund_stensland_price(100, 100, 1, .04, .03, otype=-1)
+    for factor in (.01, 10):
+        scaled = bjerksund_stensland_price(100 * factor, 100 * factor, 1, .04, .03, otype=-1)
+        assert scaled == pytest.approx(base * factor, rel=1e-9)
+
+
+def test_solver_distinguishes_unsupported_domain_from_invalid_prices():
+    diagnostics = {}
+    prices = np.array([.005, .3910221968707839, -1.])
+    iv = solve_iv_robust(100, 100, 1, .04, prices, -1., model="bjerksund_stensland", diagnostics=diagnostics)
+    assert np.isnan(iv[0]) and np.isnan(iv[2])
+    assert iv[1] == pytest.approx(.03, abs=1e-5)
+    assert diagnostics["unsupported_model"].tolist() == [True, False, False]
+
+
+def test_brent_never_evaluates_an_unsupported_trial_volatility(monkeypatch):
+    from api import engine
+    original = engine.bjerksund_stensland_price
+    target = original(100, 100, 1, .04, .03, 0., -1.)
+    evaluated = []
+
+    def checked(S, K, T, r, sigma, q=0., otype=1.):
+        price = original(S, K, T, r, sigma, q, otype)
+        assert np.isfinite(price).all()
+        evaluated.extend(np.atleast_1d(sigma).tolist())
+        return price
+
+    monkeypatch.setattr(engine, "bjerksund_stensland_price", checked)
+    # One fast iteration forces the bracketed path to finish refinement.
+    recovered = solve_iv_robust(100, 100, 1, .04, target, -1., model="bjerksund_stensland", max_iter=1)
+    assert recovered == pytest.approx(.03, abs=1e-5)
+    assert min(evaluated) > .02

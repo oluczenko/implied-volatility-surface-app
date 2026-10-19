@@ -7,11 +7,15 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
-from .engine import calculate_all_greeks, solve_iv_robust
+from .engine import calculate_all_greeks, iv_price_bounds, solve_iv_robust
 
 
 class NoOptionsError(ValueError):
     """No contracts match the requested filters or produce a usable IV."""
+
+    def __init__(self, message, quality=None):
+        super().__init__(message)
+        self.quality = quality
 
 
 class MarketDataError(ValueError):
@@ -81,6 +85,10 @@ def fetch_raw_options(
     metrics = None
     chain_errors = []
     successful_chains = 0
+    quality = {"received_contracts": 0, "excluded_by_filters": 0,
+               "rejected_quotes": 0, "eligible_contracts": 0,
+               "invalid_or_unidentifiable_prices": 0, "unsupported_model": 0, "unresolved_iv": 0,
+               "solved_contracts": 0}
     for exp_str, dte_days, T_years in valid_expirations:
         try:
             chain = ticker.option_chain(exp_str)
@@ -144,7 +152,7 @@ def fetch_raw_options(
         has_spread = (
             np.isfinite(selected[["bid", "ask"]]).all(axis=1)
             & (selected["bid"] > 0)
-            & (selected["ask"] > selected["bid"])
+            & (selected["ask"] >= selected["bid"])
         )
         trade_time = pd.to_datetime(selected["lastTradeDate"], utc=True, errors="coerce")
         trade_age = (pd.Timestamp(now) - trade_time).dt.total_seconds()
@@ -166,13 +174,17 @@ def fetch_raw_options(
         valid = (
             np.isfinite(selected["strike"])
             & selected["strike"].between(min_strike, max_strike)
-            & (has_spread | use_last)
         )
         if option_type == "otm":
             valid &= (
                 ((selected["otype"] == -1) & (selected["strike"] < spot_price))
                 | ((selected["otype"] == 1) & (selected["strike"] >= spot_price))
             )
+        quality["received_contracts"] += len(selected)
+        quality["excluded_by_filters"] += int((~valid).sum())
+        quality["rejected_quotes"] += int((valid & ~(has_spread | use_last)).sum())
+        valid &= has_spread | use_last
+        quality["eligible_contracts"] += int(valid.sum())
         valid_quotes = selected.loc[valid].copy()
         if valid_quotes.empty:
             continue
@@ -186,7 +198,7 @@ def fetch_raw_options(
     if not frames:
         if chain_errors and successful_chains == 0:
             raise MarketDataError(f"Failed to fetch option chains for '{symbol}'") from chain_errors[-1]
-        raise NoOptionsError(f"No usable option prices matched the criteria for symbol: '{symbol}'")
+        raise NoOptionsError(f"No usable option prices matched the criteria for symbol: '{symbol}'", quality)
 
     df = pd.concat(frames, ignore_index=True)[
         ["expiration", "dte_days", "T", "strike", "bid", "ask", "midPrice", "otype",
@@ -198,6 +210,7 @@ def fetch_raw_options(
     if chain_errors:
         _report_warning(f"Skipped {len(chain_errors)} failed option-chain requests for '{symbol}'.",
                         diagnostics)
+    df.attrs["quality"] = quality
     return df, metrics
 
 
@@ -231,6 +244,7 @@ def build_surface_dataframe(
     r = metrics["risk_free_rate"]
     q = metrics["dividend_yield"]
 
+    solver_diagnostics = {}
     df["iv"] = solve_iv_robust(
         S=spot,
         K=df["strike"].to_numpy(),
@@ -239,12 +253,36 @@ def build_surface_dataframe(
         market_price=df["midPrice"].to_numpy(),
         otypes=df["otype"].to_numpy(),
         q=q,
-        model=model,
+        model=model, diagnostics=solver_diagnostics,
     )
 
-    df = df.loc[np.isfinite(df["iv"]) & (df["iv"] > 1e-4) & (df["iv"] < 5)].copy()
+    quality = df.attrs["quality"].copy()
+    lower, upper = iv_price_bounds(spot, df["strike"].to_numpy(), df["T"].to_numpy(),
+                                   r, q, df["otype"].to_numpy(), model)
+    identifiable = (df["midPrice"].to_numpy() > lower + 1e-4) & (df["midPrice"].to_numpy() < upper)
+    solved = identifiable & np.isfinite(df["iv"]) & (df["iv"] >= .001) & (df["iv"] <= 5.)
+    quality["invalid_or_unidentifiable_prices"] = int((~identifiable).sum())
+    unsupported = np.asarray(solver_diagnostics.get("unsupported_model", np.zeros(len(df), dtype=bool)))
+    quality["unsupported_model"] = int((identifiable & unsupported & ~solved).sum())
+    quality["unresolved_iv"] = int((identifiable & ~unsupported & ~solved).sum())
+    quality["solved_contracts"] = int(solved.sum())
+    dropped = len(df) - quality["solved_contracts"]
+    if dropped:
+        _report_warning(
+            f"IV resolved for {quality['solved_contracts']} of {len(df)} eligible contracts; "
+            f"{quality['invalid_or_unidentifiable_prices']} prices outside bounds or without identifiable time value; "
+            f"{quality['unsupported_model']} outside the supported approximation domain; "
+            f"{quality['unresolved_iv']} unresolved within the supported IV range (0.1%–500%).",
+            diagnostics,
+        )
+    df = df.loc[solved].copy()
     if df.empty:
-        raise NoOptionsError(f"Failed to resolve implied volatility for any usable contracts of '{symbol}'.")
+        raise NoOptionsError(
+            f"Failed to resolve implied volatility for any usable contracts of '{symbol}'. "
+            f"{quality['invalid_or_unidentifiable_prices']} prices have no identifiable IV; "
+            f"{quality['unsupported_model']} contracts are outside the approximation domain; "
+            f"{quality['unresolved_iv']} contracts did not converge in the supported range.", quality,
+        )
 
     greeks = calculate_all_greeks(
         S=spot,
@@ -257,4 +295,26 @@ def build_surface_dataframe(
         model=model,
     )
 
-    return df.assign(iv_pct=df["iv"] * 100, **greeks).reset_index(drop=True), metrics
+    if any(not np.isfinite(values).all() for values in greeks.values()):
+        _report_warning("Some Greeks are unavailable because a finite-difference bump leaves "
+                        "the supported approximation domain or produces a nonfinite value.", diagnostics)
+
+    # Bid/ask IVs measure quote-spread sensitivity, not a statistical confidence interval.
+    # Last trades have no synchronized spread and must not inherit bid/ask bounds.
+    df["iv_bid"] = np.nan
+    df["iv_ask"] = np.nan
+    midpoint = df["price_source"].eq("midpoint")
+    for price_column, iv_column in (("bid", "iv_bid"), ("ask", "iv_ask")):
+        if midpoint.any():
+            df.loc[midpoint, iv_column] = solve_iv_robust(
+                spot, df.loc[midpoint, "strike"].to_numpy(), df.loc[midpoint, "T"].to_numpy(),
+                r, df.loc[midpoint, price_column].to_numpy(), df.loc[midpoint, "otype"].to_numpy(),
+                q=q, model=model,
+            )
+    unresolved_bounds = midpoint & (df["iv_bid"].isna() | df["iv_ask"].isna())
+    if unresolved_bounds.any():
+        _report_warning(f"Bid/ask IV interval unavailable for {int(unresolved_bounds.sum())} midpoint contracts; "
+                        "one or both spread endpoints have no identifiable IV in the supported range or approximation domain.", diagnostics)
+    result = df.assign(iv_pct=df["iv"] * 100, **greeks).reset_index(drop=True)
+    result.attrs["quality"] = quality
+    return result, metrics

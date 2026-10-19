@@ -150,8 +150,10 @@ def test_build_surface_dataframe_pipeline(monkeypatch, model):
 
 def test_invalid_solver_results_filtered(monkeypatch):
     install_ticker(monkeypatch, option_ticker(quotes(), quotes()))
-    monkeypatch.setattr(data, "solve_iv_robust", lambda **_: np.array([np.nan, 0.2, 0.3]))
-    frame, _ = data.build_surface_dataframe("ABC", model="black_scholes")
+    monkeypatch.setattr(data, "solve_iv_robust", Mock(side_effect=[
+        np.array([np.nan, .2, .3]), np.array([.15, .25]), np.array([.25, .35]),
+    ]))
+    frame, _ = data.build_surface_dataframe("ABC", model="black_scholes", diagnostics=[])
     assert frame["strike"].tolist() == [100, 110]
     assert frame["iv"].tolist() == [0.2, 0.3]
     assert frame.index.tolist() == [0, 1]
@@ -160,7 +162,7 @@ def test_invalid_solver_results_filtered(monkeypatch):
 def test_no_valid_solver_results_is_an_error(monkeypatch):
     install_ticker(monkeypatch, option_ticker(quotes(), quotes()))
     monkeypatch.setattr(data, "solve_iv_robust", lambda **_: np.full(3, np.nan))
-    with pytest.raises(ValueError, match="Failed to resolve"):
+    with pytest.warns(UserWarning, match="IV resolved for 0"), pytest.raises(ValueError, match="Failed to resolve"):
         data.build_surface_dataframe("ABC")
 
 
@@ -302,3 +304,76 @@ def test_missing_quote_values_can_use_timestamped_trade(monkeypatch):
 def test_invalid_trade_age_fails_before_network(age):
     with pytest.raises(ValueError, match="maximum trade age"):
         data.fetch_raw_options("ABC", max_trade_age_days=age)
+
+
+def test_positive_equal_bid_ask_is_a_valid_midpoint(monkeypatch):
+    install_ticker(monkeypatch, option_ticker(quotes((100,)).assign(bid=1., ask=1.), None))
+    frame, _ = data.fetch_raw_options("ABC", allow_last_price=False)
+    assert frame["midPrice"].tolist() == [1.]
+    assert frame["price_source"].tolist() == ["midpoint"]
+
+
+def test_quality_counts_partition_inputs_and_separate_price_from_solver_errors(monkeypatch):
+    calls = pd.DataFrame({"strike": [90, 100, 110, 120, 140], "bid": [1, 1, 1, 2, 1], "ask": [1.2, 1.2, 1.2, 1, 1.2]})
+    install_ticker(monkeypatch, option_ticker(calls, None))
+    monkeypatch.setattr(data, "solve_iv_robust", Mock(side_effect=[
+        np.array([np.nan, .3, np.nan]), np.array([.2]), np.array([.4]),
+    ]))
+    diagnostics = []
+    frame, _ = data.build_surface_dataframe("ABC", option_type="call", model="black_scholes", diagnostics=diagnostics)
+    assert frame.attrs["quality"] == {
+        "received_contracts": 5, "excluded_by_filters": 1, "rejected_quotes": 1,
+        "eligible_contracts": 3, "invalid_or_unidentifiable_prices": 1,
+        "unsupported_model": 0, "unresolved_iv": 1, "solved_contracts": 1,
+    }
+    assert any("1 unresolved" in message for message in diagnostics)
+
+
+@pytest.mark.parametrize("model,pricing", [
+    ("black_scholes", black_scholes_price), ("bjerksund_stensland", bjerksund_stensland_price),
+])
+def test_bid_ask_iv_interval_reprices_spread_and_handles_equal_quotes(monkeypatch, model, pricing):
+    T = (7 + 4 / 24) / 365
+    strikes = np.array([100., 102.])
+    bids = pricing(100, strikes, T, .042, np.array([.25, .3]), 0., 1.)
+    asks = pricing(100, strikes, T, .042, np.array([.35, .3]), 0., 1.)
+    calls = pd.DataFrame({"strike": strikes, "bid": bids, "ask": asks})
+    install_ticker(monkeypatch, option_ticker(calls, None, expirations=("2026-10-26",)))
+    frame, _ = data.build_surface_dataframe("ABC", model=model)
+    assert np.allclose(frame["iv_bid"], [.25, .3], atol=1e-4)
+    assert np.allclose(frame["iv_ask"], [.35, .3], atol=1e-4)
+    assert np.all(frame["iv_bid"] <= frame["iv"] + 1e-5)
+    assert np.all(frame["iv_ask"] >= frame["iv"] - 1e-5)
+    assert frame.attrs["quality"]["solved_contracts"] == 2
+
+
+def test_last_trades_never_inherit_bid_ask_iv_intervals(monkeypatch):
+    calls = pd.DataFrame({"strike": [100], "bid": [0.], "ask": [0.], "lastPrice": [1.5],
+                          "lastTradeDate": ["2026-10-19T15:45Z"]})
+    install_ticker(monkeypatch, option_ticker(calls, None))
+    frame, _ = data.build_surface_dataframe("ABC", diagnostics=[])
+    assert frame[["iv_bid", "iv_ask"]].isna().all().all()
+
+
+def test_unsupported_approximation_has_its_own_quality_bucket(monkeypatch):
+    puts = pd.DataFrame({"strike": [99., 100.], "bid": [.29, .004], "ask": [.31, .006]})
+    install_ticker(monkeypatch, option_ticker(None, puts, expirations=("2027-10-19",)))
+    diagnostics = []
+    frame, _ = data.build_surface_dataframe("ABC", option_type="put", diagnostics=diagnostics)
+    quality = frame.attrs["quality"]
+    assert frame["strike"].tolist() == [99.]
+    assert quality["eligible_contracts"] == 2
+    assert quality["unsupported_model"] == 1
+    assert quality["unresolved_iv"] == 0
+    assert quality["invalid_or_unidentifiable_prices"] == 0
+    assert quality["solved_contracts"] == 1
+    assert any("1 outside the supported approximation domain" in message for message in diagnostics)
+
+
+def test_all_unsupported_prices_preserve_reason_in_no_options_error(monkeypatch):
+    puts = pd.DataFrame({"strike": [100.], "bid": [.004], "ask": [.006]})
+    install_ticker(monkeypatch, option_ticker(None, puts, expirations=("2027-10-19",)))
+    with pytest.raises(data.NoOptionsError, match="outside the approximation domain") as error:
+        data.build_surface_dataframe("ABC", option_type="put", diagnostics=[])
+    assert error.value.quality["unsupported_model"] == 1
+    assert error.value.quality["unresolved_iv"] == 0

@@ -47,3 +47,48 @@ test("empty or invalid API data is rejected before replacing the current chart",
     assert.throws(() => parseSurface(bad));
   }
 });
+
+
+test("old snapshots normalize absent IV spread endpoints and quality counts", () => {
+  const data = parseSurface(snapshot);
+  assert.equal(data.quality, null);
+  assert.ok(data.contracts.every((c) => c.iv_bid === null && c.iv_ask === null));
+});
+
+test("bid/ask IV endpoints remain distinct from last-trade estimates", () => {
+  const midpoint = { ...base, price_source: "midpoint", iv_bid: .2, iv_ask: .4 };
+  const valid = parseSurface({ ...snapshot, contracts: [midpoint] });
+  assert.equal(valid.contracts[0].iv_bid, .2);
+  for (const bad of [
+    { ...midpoint, iv_bid: .5, iv_ask: .2 },
+    { ...midpoint, iv_bid: Infinity },
+    { ...midpoint, iv_ask: -1 },
+    { ...midpoint, price_source: "last_trade" },
+  ]) assert.throws(() => parseSurface({ ...snapshot, contracts: [bad] }));
+  assert.equal(parseSurface({ ...snapshot, contracts: [{ ...midpoint, iv_bid: null }] }).contracts[0].iv_bid, null);
+});
+
+test("quality counts must account for every received and solved observation", () => {
+  const quality = { received_contracts: 5, excluded_by_filters: 1, rejected_quotes: 1,
+    eligible_contracts: 3, invalid_or_unidentifiable_prices: 1, unresolved_iv: 1, solved_contracts: 1 };
+  const data = { ...snapshot, contracts: [base], quality };
+  assert.equal(parseSurface(data).quality?.unresolved_iv, 1);
+  for (const bad of [0, [], {}, { ...quality, unresolved_iv: -1 },
+    { ...quality, received_contracts: 6 }, { ...quality, solved_contracts: 2 },
+    { ...quality, eligible_contracts: 1.5 }]) {
+    assert.throws(() => parseSurface({ ...data, quality: bad }));
+  }
+});
+
+
+test("unsupported model counts are separate from solver failures and optional in older responses", () => {
+  const quality = { received_contracts: 3, excluded_by_filters: 0, rejected_quotes: 0,
+    eligible_contracts: 3, invalid_or_unidentifiable_prices: 0, unsupported_model: 1,
+    unresolved_iv: 1, solved_contracts: 1 };
+  const data = { ...snapshot, contracts: [base], quality };
+  assert.equal(parseSurface(data).quality?.unsupported_model, 1);
+  assert.throws(() => parseSurface({ ...data, quality: { ...quality, unsupported_model: -1 } }));
+  assert.throws(() => parseSurface({ ...data, quality: { ...quality, unsupported_model: 2 } }));
+  const { unsupported_model, ...legacy } = quality;
+  assert.equal(parseSurface({ ...data, quality: { ...legacy, unresolved_iv: 2 } }).quality?.unsupported_model, 0);
+});
