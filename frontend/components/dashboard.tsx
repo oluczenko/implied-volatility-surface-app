@@ -8,6 +8,7 @@ import { SmileChart, SurfaceChart } from "./charts";
 
 const demo = parseSurface(snapshot);
 const expiryHorizons = [
+  { days: 7, label: "1 week (7 days)" },
   { days: 30, label: "1 month (30 days)" },
   { days: 90, label: "3 months (90 days)" },
   { days: 180, label: "6 months (180 days)" },

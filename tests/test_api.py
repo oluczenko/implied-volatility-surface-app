@@ -84,7 +84,7 @@ def test_surface_passes_custom_parameters(client, pipeline):
     assert args["max_dte_days"] == 90
 
 
-@pytest.mark.parametrize("horizon", [30, 90, 180, 365])
+@pytest.mark.parametrize("horizon", [7, 30, 90, 180, 365])
 def test_dashboard_horizons_request_all_expirations(client, pipeline, horizon):
     response = client.get("/api/surface", params={"symbol": "AAPL", "max_dte_days": horizon})
     assert response.status_code == 200

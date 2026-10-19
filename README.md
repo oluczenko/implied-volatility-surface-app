@@ -18,7 +18,7 @@ an interactive Next.js dashboard with European and American pricing models.
 - **Two pricing models:** select Black–Scholes for European exercise or the
   Bjerksund–Stensland approximation for American exercise.
 - **Flexible market selection:** choose a ticker, calls, puts or OTM puts and
-  calls, an expiry horizon of 30, 90, 180 or 365 days, and a strike range relative
+  calls, an expiry horizon of 7, 30, 90, 180 or 365 days, and a strike range relative
   to spot. All available expirations within the horizon are requested; the
   default horizon is one year, with a minimum of two days to expiry.
 - **Strike or log-moneyness:** switch the surface's horizontal axis between

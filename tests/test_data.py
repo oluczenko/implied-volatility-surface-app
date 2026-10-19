@@ -104,7 +104,7 @@ def test_dte_filtering_and_pricing_time(monkeypatch):
     assert frame["expiration"].unique().tolist() == ["2026-10-21"]
 
 
-@pytest.mark.parametrize("horizon", [30, 90, 180, 365])
+@pytest.mark.parametrize("horizon", [7, 30, 90, 180, 365])
 def test_horizon_includes_boundary_and_never_fetches_outside_dates(monkeypatch, horizon):
     today = dt.date(2026, 10, 19)
     days = [horizon + 1, 2, 1, horizon]
