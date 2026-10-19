@@ -18,7 +18,9 @@ an interactive Next.js dashboard with European and American pricing models.
 - **Two pricing models:** select Black–Scholes for European exercise or the
   Bjerksund–Stensland approximation for American exercise.
 - **Flexible market selection:** choose a ticker, calls, puts or OTM puts and
-  calls, the number of nearby expirations and a strike range relative to spot.
+  calls, an expiry horizon of 30, 90, 180 or 365 days, and a strike range relative
+  to spot. All available expirations within the horizon are requested; the
+  default horizon is one year, with a minimum of two days to expiry.
 - **Strike or log-moneyness:** switch the surface's horizontal axis between
   strike and $\ln(K/S)$.
 - **Quote quality in view:** distinguish bid/ask midpoints from last-trade
@@ -36,7 +38,10 @@ The backend uses **yfinance** to retrieve option chains, the underlying price an
 market inputs. Each dataset passes through four stages:
 
 1. **Select contracts.** Filter available expirations, strikes and option types.
-   The OTM selection combines puts below spot with calls at or above spot.
+   Up to four workers retrieve option chains concurrently, each using its own
+   ticker object. Results are processed in expiration order; failed chain
+   requests are reported with their dates. The OTM selection combines puts
+   below spot with calls at or above spot.
 2. **Construct prices.** Use the bid/ask midpoint when both quotes are valid:
    $P_{\mathrm{market}}=(\mathrm{bid}+\mathrm{ask})/2$.
    Positive locked quotes, where bid equals ask, are accepted. When enabled,
@@ -184,3 +189,11 @@ validation.
 The numerical implementation lives in [`api/engine.py`](api/engine.py), the
 market-data pipeline in [`api/data.py`](api/data.py), and chart construction in
 [`frontend/lib/surface.ts`](frontend/lib/surface.ts).
+
+The API accepts `max_dte_days` from 1 to 365 (default 365) and requires
+`min_dte_days <= max_dte_days`. For example,
+`/api/surface?symbol=AAPL&max_dte_days=365` requests every available expiry from
+two days away through one year. An optional `max_expirations` count cap remains
+available for older clients; the dashboard does not send it. Saved snapshots
+retain the dates captured when they were generated; changing the horizon takes
+effect when fetching a new dataset.

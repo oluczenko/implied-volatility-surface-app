@@ -1,4 +1,6 @@
 import datetime as dt
+from copy import copy
+from threading import Barrier, Lock, get_ident
 from types import SimpleNamespace
 from unittest.mock import Mock, call
 
@@ -27,7 +29,7 @@ def frozen_market(monkeypatch):
 def install_ticker(monkeypatch, ticker, tnx=None):
     if tnx is None:
         tnx = SimpleNamespace(fast_info=SimpleNamespace(last_price=4.2))
-    factory = Mock(side_effect=lambda symbol: tnx if symbol == "^TNX" else ticker)
+    factory = Mock(side_effect=lambda symbol: tnx if symbol == "^TNX" else copy(ticker))
     monkeypatch.setattr(data.yf, "Ticker", factory)
     return factory
 
@@ -102,6 +104,109 @@ def test_dte_filtering_and_pricing_time(monkeypatch):
     assert frame["expiration"].unique().tolist() == ["2026-10-21"]
 
 
+@pytest.mark.parametrize("horizon", [30, 90, 180, 365])
+def test_horizon_includes_boundary_and_never_fetches_outside_dates(monkeypatch, horizon):
+    today = dt.date(2026, 10, 19)
+    days = [horizon + 1, 2, 1, horizon]
+    dates = [(today + dt.timedelta(days=day)).isoformat() for day in days]
+    ticker = option_ticker(quotes(), quotes(), expirations=dates)
+    install_ticker(monkeypatch, ticker)
+    frame, _ = data.fetch_raw_options("ABC", max_dte_days=horizon)
+    expected = sorted([dates[1], dates[3]])
+    assert frame["expiration"].unique().tolist() == expected
+    ticker.option_chain.assert_has_calls([call(date) for date in expected], any_order=True)
+    assert ticker.option_chain.call_count == 2
+
+
+def test_default_year_horizon_returns_all_dates_without_eight_expiry_cap(monkeypatch):
+    today = dt.date(2026, 10, 19)
+    dates = [(today + dt.timedelta(days=day)).isoformat() for day in range(2, 365, 20)]
+    ticker = option_ticker(quotes(), quotes(), expirations=list(reversed(dates)))
+    install_ticker(monkeypatch, ticker)
+    frame, _ = data.fetch_raw_options("ABC")
+    assert len(dates) > 8
+    assert frame["expiration"].unique().tolist() == dates
+    assert ticker.option_chain.call_count == len(dates)
+
+
+def test_empty_horizon_does_not_start_chain_requests(monkeypatch):
+    ticker = option_ticker(quotes(), quotes(), expirations=("2027-10-20",))
+    factory = install_ticker(monkeypatch, ticker)
+    with pytest.raises(data.NoOptionsError):
+        data.fetch_raw_options("ABC")
+    ticker.option_chain.assert_not_called()
+    assert factory.call_args_list == [call("ABC")]
+
+
+def test_parallel_downloads_use_four_independent_workers_and_keep_date_order(monkeypatch):
+    dates = [f"2026-11-{day:02d}" for day in range(1, 10)]
+    barrier = Barrier(4)
+    lock = Lock()
+    instances = []
+    active = 0
+    maximum_active = 0
+    initialized = []
+    finished = []
+
+    class WorkerTicker:
+        def __init__(self, symbol):
+            assert symbol == "ABC"
+            self.thread = get_ident()
+            self.ready = False
+            with lock:
+                instances.append(self)
+
+        @property
+        def options(self):
+            assert self.thread == get_ident()
+            assert not self.ready
+            self.ready = True
+            with lock:
+                initialized.append(self.thread)
+            return dates
+
+        def option_chain(self, date):
+            nonlocal active, maximum_active
+            assert self.ready
+            assert self.thread == get_ident()
+            with lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            try:
+                if date in dates[:4]:
+                    # Requires four genuinely overlapping tasks; no timing assertion.
+                    barrier.wait(timeout=5)
+                with lock:
+                    finished.append(date)
+                if date == dates[5]:
+                    raise RuntimeError("One chain failed")
+                return date
+            finally:
+                with lock:
+                    active -= 1
+
+    monkeypatch.setattr(data.yf, "Ticker", WorkerTicker)
+    results = data._fetch_option_chains("ABC", dates)
+    assert maximum_active == 4
+    assert len(instances) == len(initialized) == len(set(initialized)) == 4
+    assert sorted(finished) == dates
+    assert [chain for chain, _ in results] == [None if date == dates[5] else date for date in dates]
+    assert isinstance(results[5][1], RuntimeError)
+    assert all(error is None for i, (_, error) in enumerate(results) if i != 5)
+
+
+def test_worker_initialization_errors_are_reported_as_chain_failures(monkeypatch):
+    class BrokenTicker:
+        @property
+        def options(self):
+            raise RuntimeError("Provider unavailable")
+
+    monkeypatch.setattr(data.yf, "Ticker", lambda _: BrokenTicker())
+    results = data._fetch_option_chains("ABC", ["2026-10-21", "2026-10-23"])
+    assert len(results) == 2
+    assert all(chain is None and isinstance(error, RuntimeError) for chain, error in results)
+
+
 def test_missing_side_and_bad_quotes(monkeypatch):
     calls = pd.DataFrame({
         "strike": [100, 105, 110, 115, 120, 140],
@@ -116,6 +221,8 @@ def test_missing_side_and_bad_quotes(monkeypatch):
 @pytest.mark.parametrize("kwargs", [
     {"option_type": "other"},
     {"min_strike_pct": 1.3, "max_strike_pct": 0.7}, {"max_expirations": 0},
+    {"max_dte_days": 0}, {"max_dte_days": 366},
+    {"min_dte_days": 31, "max_dte_days": 30},
 ])
 def test_invalid_inputs_fail_before_fetching(kwargs):
     with pytest.raises(ValueError):
@@ -166,7 +273,7 @@ def test_no_valid_solver_results_is_an_error(monkeypatch):
         data.build_surface_dataframe("ABC")
 
 
-def test_chain_metrics_reused_without_extra_ticker_requests(monkeypatch):
+def test_chain_metrics_reused_and_treasury_fetched_once(monkeypatch):
     # No .info or .fast_info on this ticker: complete chain data must suffice.
     ticker = option_ticker(quotes(), quotes(), expirations=("2026-10-21", "2026-10-26"), underlying={
         "regularMarketPrice": 100, "trailingAnnualDividendYield": 0.02,
@@ -176,10 +283,10 @@ def test_chain_metrics_reused_without_extra_ticker_requests(monkeypatch):
     assert len(frame) == 6
     assert metrics["spot_price"] == 100
     assert metrics["dividend_yield"] == 0.02
-    assert factory.call_args_list == [call("ABC"), call("^TNX")]
-    assert ticker.option_chain.call_args_list == [
-        call("2026-10-21"), call("2026-10-26"),
-    ]
+    assert factory.call_args_list.count(call("^TNX")) == 1
+    assert all(args in (call("ABC"), call("^TNX")) for args in factory.call_args_list)
+    ticker.option_chain.assert_has_calls([call("2026-10-21"), call("2026-10-26")], any_order=True)
+    assert ticker.option_chain.call_count == 2
 
 
 def test_missing_chain_spot_is_an_error(monkeypatch):
@@ -194,9 +301,15 @@ def test_missing_chain_spot_is_an_error(monkeypatch):
 def test_one_failed_chain_does_not_discard_other_expirations(monkeypatch):
     ticker = option_ticker(quotes(), quotes(), expirations=("2026-10-21", "2026-10-26"))
     chain = ticker.option_chain.return_value
-    ticker.option_chain.side_effect = [RuntimeError("Yahoo request failed"), chain]
+
+    def load(expiration):
+        if expiration == "2026-10-21":
+            raise RuntimeError("Yahoo request failed")
+        return chain
+
+    ticker.option_chain.side_effect = load
     install_ticker(monkeypatch, ticker)
-    with pytest.warns(UserWarning, match="Skipped 1 failed"):
+    with pytest.warns(UserWarning, match=r"Skipped 1 failed.*2026-10-21"):
         frame, _ = data.fetch_raw_options("ABC")
     assert frame["expiration"].unique().tolist() == ["2026-10-26"]
     assert ticker.option_chain.call_count == 2
@@ -234,9 +347,9 @@ def test_forward_cash_dividend_preferred_over_trailing(monkeypatch):
 
 def test_empty_chain_does_not_block_next_expiration(monkeypatch):
     ticker = option_ticker(quotes(), quotes(), expirations=("2026-10-21", "2026-10-26"))
-    ticker.option_chain.side_effect = [
-        SimpleNamespace(calls=None, puts=None, underlying=None), ticker.option_chain.return_value,
-    ]
+    chain = ticker.option_chain.return_value
+    ticker.option_chain.side_effect = lambda expiration: (
+        SimpleNamespace(calls=None, puts=None, underlying=None) if expiration == "2026-10-21" else chain)
     install_ticker(monkeypatch, ticker)
     frame, _ = data.fetch_raw_options("ABC")
     assert frame["expiration"].unique().tolist() == ["2026-10-26"]

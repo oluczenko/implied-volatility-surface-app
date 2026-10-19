@@ -1,5 +1,7 @@
 import datetime as dt
 import warnings
+from concurrent.futures import ThreadPoolExecutor
+from threading import local
 from typing import Literal
 from zoneinfo import ZoneInfo
 
@@ -29,6 +31,34 @@ def _report_warning(message: str, diagnostics: list[str] | None) -> None:
         diagnostics.append(message)
 
 
+def _fetch_option_chains(symbol: str, expirations: list[str]):
+    """Return (chain, error) pairs in date order, with at most four concurrent requests.
+
+    Each worker owns a Ticker and initializes its expiration mapping through
+    the public options API. Only downloading runs in workers; filtering and
+    market-input selection remain on the calling thread.
+    """
+    if not expirations:
+        return []
+    worker = local()
+
+    def fetch(expiration):
+        try:
+            if not hasattr(worker, "ticker"):
+                ticker = yf.Ticker(symbol)
+                # Populate this Ticker's expiration mapping once per worker.
+                ticker.options
+                worker.ticker = ticker
+            return worker.ticker.option_chain(expiration), None
+        except Exception as exc:
+            return None, exc
+
+    with ThreadPoolExecutor(
+        max_workers=min(4, len(expirations)), thread_name_prefix="option-chain",
+    ) as executor:
+        return list(executor.map(fetch, expirations))
+
+
 def fetch_raw_options(
     symbol: str,
     option_type: Literal["call", "put", "otm"] = "otm",
@@ -39,6 +69,7 @@ def fetch_raw_options(
     allow_last_price: bool = True,
     max_trade_age_days: float = 4,
     diagnostics: list[str] | None = None,
+    max_dte_days: int = 365,
 ):
     """Fetch quotes and market inputs (rates as decimals, T as ACT/365 years).
 
@@ -48,10 +79,14 @@ def fetch_raw_options(
     midPrice is retained for compatibility even when price_source is last_trade.
     Dividend input prefers dividendRate / spot, then trailing yield.
     Missing dividend data assumes q=0 with a warning, not confirmed zero payouts.
+    Fetch every available expiration within the inclusive calendar-day horizon
+    (up to 365 days), unless an optional legacy max_expirations cap is supplied.
     """
     if option_type not in ("call", "put", "otm"):
         raise ValueError(f"Invalid option_type: '{option_type}'")
-    if min_dte_days < 0 or (max_expirations is not None and max_expirations <= 0):
+    if (not 0 <= min_dte_days <= max_dte_days <= 365
+            or max_dte_days < 1
+            or (max_expirations is not None and max_expirations <= 0)):
         raise ValueError("Invalid expiration limits")
     if not (0 < min_strike_pct <= max_strike_pct < np.inf):
         raise ValueError("Invalid strike range")
@@ -76,7 +111,7 @@ def fetch_raw_options(
         dte_days = (exp_date - now.date()).days
         seconds_to_expiry = exp_dt.timestamp() - now.timestamp()
         T_years = seconds_to_expiry / (365.0 * 86400)
-        if dte_days >= min_dte_days and T_years > 0:
+        if min_dte_days <= dte_days <= max_dte_days and T_years > 0:
             valid_expirations.append((exp_str, dte_days, T_years))
 
     valid_expirations = valid_expirations[:max_expirations]
@@ -84,16 +119,17 @@ def fetch_raw_options(
     frames = []
     metrics = None
     chain_errors = []
+    failed_expirations = []
     successful_chains = 0
     quality = {"received_contracts": 0, "excluded_by_filters": 0,
                "rejected_quotes": 0, "eligible_contracts": 0,
                "invalid_or_unidentifiable_prices": 0, "unsupported_model": 0, "unresolved_iv": 0,
                "solved_contracts": 0}
-    for exp_str, dte_days, T_years in valid_expirations:
-        try:
-            chain = ticker.option_chain(exp_str)
-        except Exception as exc:
-            chain_errors.append(exc)
+    chains = _fetch_option_chains(symbol, [exp for exp, _, _ in valid_expirations])
+    for (exp_str, dte_days, T_years), (chain, error) in zip(valid_expirations, chains):
+        if error is not None:
+            chain_errors.append(error)
+            failed_expirations.append(exp_str)
             continue
         successful_chains += 1
         if all(side is None or side.empty for side in (chain.calls, chain.puts)):
@@ -208,7 +244,8 @@ def fetch_raw_options(
         _report_warning("Using last-trade estimates for some options; prices may be stale "
                         "relative to spot and are not EOD quotes.", diagnostics)
     if chain_errors:
-        _report_warning(f"Skipped {len(chain_errors)} failed option-chain requests for '{symbol}'.",
+        _report_warning(f"Skipped {len(chain_errors)} failed option-chain requests for '{symbol}' "
+                        f"({', '.join(failed_expirations)}).",
                         diagnostics)
     df.attrs["quality"] = quality
     return df, metrics
@@ -225,6 +262,7 @@ def build_surface_dataframe(
     allow_last_price: bool = True,
     max_trade_age_days: float = 4,
     diagnostics: list[str] | None = None,
+    max_dte_days: int = 365,
 ):
     """Fetch quotes, solve IV, and calculate Greeks for the selected model."""
     if model not in ("black_scholes", "bjerksund_stensland"):
@@ -233,6 +271,7 @@ def build_surface_dataframe(
         symbol=symbol,
         option_type=option_type,
         min_dte_days=min_dte_days,
+        max_dte_days=max_dte_days,
         max_expirations=max_expirations,
         min_strike_pct=min_strike_pct,
         max_strike_pct=max_strike_pct,

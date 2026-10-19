@@ -20,8 +20,15 @@ class SurfaceQuery(BaseModel):
     symbol: str = Field(min_length=1, max_length=20, pattern=r"^[A-Z0-9^][A-Z0-9.^=\-]*$")
     model: Literal["black_scholes", "bjerksund_stensland"] = "bjerksund_stensland"
     option_type: Literal["call", "put", "otm"] = "otm"
-    min_dte_days: int = Field(default=2, ge=0, le=3650)
-    max_expirations: int = Field(default=4, ge=1, le=8)
+    min_dte_days: int = Field(default=2, ge=0, le=365)
+    max_dte_days: int = Field(
+        default=365, ge=1, le=365,
+        description="Inclusive expiry horizon in calendar days; returns all available dates.",
+    )
+    max_expirations: int | None = Field(
+        default=None, ge=1,
+        description="Optional date-count cap for older clients; omitted by the dashboard.",
+    )
     min_strike_pct: float = Field(default=0.70, gt=0, le=5)
     max_strike_pct: float = Field(default=1.30, gt=0, le=5)
     allow_last_price: bool = True
@@ -33,9 +40,11 @@ class SurfaceQuery(BaseModel):
         return value.strip().upper()
 
     @model_validator(mode="after")
-    def validate_strike_range(self) -> Self:
+    def validate_ranges(self) -> Self:
         if self.min_strike_pct > self.max_strike_pct:
             raise ValueError("min_strike_pct must not exceed max_strike_pct")
+        if self.min_dte_days > self.max_dte_days:
+            raise ValueError("min_dte_days must not exceed max_dte_days")
         return self
 
 

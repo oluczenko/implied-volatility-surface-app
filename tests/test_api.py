@@ -65,13 +65,14 @@ def test_surface_json_and_defaults(client, pipeline):
     assert payload["quality"]["solved_contracts"] == len(payload["contracts"])
     args = pipeline.call_args.kwargs
     assert args["symbol"] == "AAPL"
-    assert args["max_expirations"] == 4
+    assert args["max_expirations"] is None
+    assert args["max_dte_days"] == 365
     assert args["allow_last_price"] is True
 
 
 def test_surface_passes_custom_parameters(client, pipeline):
     params = {"symbol": "BRK-B", "model": "black_scholes", "option_type": "put",
-              "max_expirations": 8, "min_dte_days": 7,
+              "max_expirations": 8, "min_dte_days": 7, "max_dte_days": 90,
               "min_strike_pct": 0.8, "max_strike_pct": 1.1,
               "allow_last_price": "false", "max_trade_age_days": 1.5}
     assert client.get("/api/surface", params=params).status_code == 200
@@ -80,6 +81,16 @@ def test_surface_passes_custom_parameters(client, pipeline):
     assert args["model"] == "black_scholes"
     assert args["max_trade_age_days"] == 1.5
     assert args["max_expirations"] == 8
+    assert args["max_dte_days"] == 90
+
+
+@pytest.mark.parametrize("horizon", [30, 90, 180, 365])
+def test_dashboard_horizons_request_all_expirations(client, pipeline, horizon):
+    response = client.get("/api/surface", params={"symbol": "AAPL", "max_dte_days": horizon})
+    assert response.status_code == 200
+    args = pipeline.call_args.kwargs
+    assert args["max_dte_days"] == horizon
+    assert args["max_expirations"] is None
 
 
 @pytest.mark.parametrize("params", [
@@ -87,9 +98,13 @@ def test_surface_passes_custom_parameters(client, pipeline):
     {"symbol": "AAPL", "model": "unknown"},
     {"symbol": "AAPL", "option_type": "both"},
     {"symbol": "AAPL", "max_expirations": 0},
-    {"symbol": "AAPL", "max_expirations": 9},
+    {"symbol": "AAPL", "max_expirations": -1},
     {"symbol": "AAPL", "max_expirations": 1.5},
     {"symbol": "AAPL", "min_dte_days": -1},
+    {"symbol": "AAPL", "max_dte_days": 0},
+    {"symbol": "AAPL", "max_dte_days": 366},
+    {"symbol": "AAPL", "max_dte_days": 30.5},
+    {"symbol": "AAPL", "min_dte_days": 31, "max_dte_days": 30},
     {"symbol": "AAPL", "min_strike_pct": 0},
     {"symbol": "AAPL", "min_strike_pct": 1.4, "max_strike_pct": 1.1},
     {"symbol": "AAPL", "max_strike_pct": "inf"},

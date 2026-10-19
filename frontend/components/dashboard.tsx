@@ -7,6 +7,12 @@ import { expirations, parseSurface } from "@/lib/surface";
 import { SmileChart, SurfaceChart } from "./charts";
 
 const demo = parseSurface(snapshot);
+const expiryHorizons = [
+  { days: 30, label: "1 month (30 days)" },
+  { days: 90, label: "3 months (90 days)" },
+  { days: 180, label: "6 months (180 days)" },
+  { days: 365, label: "1 year (365 days)" },
+];
 const modelName = (model: PricingModel) => model === "black_scholes" ? "Black–Scholes" : "Bjerksund–Stensland";
 const number = (value: number, decimals = 2) => value.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 const dateLabel = (date: string) => new Date(date).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "UTC" });
@@ -23,7 +29,7 @@ export default function Dashboard() {
   const [symbol, setSymbol] = useState("AAPL");
   const [model, setModel] = useState<PricingModel>(demo.model);
   const [kind, setKind] = useState("otm");
-  const [count, setCount] = useState(6);
+  const [maxDte, setMaxDte] = useState(365);
   const [minStrike, setMinStrike] = useState(70);
   const [maxStrike, setMaxStrike] = useState(130);
   const [allowLast, setAllowLast] = useState(true);
@@ -58,7 +64,7 @@ export default function Dashboard() {
     setError("");
     try {
       const query = new URLSearchParams({ symbol: symbol.trim().toUpperCase(), model, option_type: kind,
-        max_expirations: String(count), min_strike_pct: String(minStrike / 100),
+        max_dte_days: String(maxDte), min_strike_pct: String(minStrike / 100),
         max_strike_pct: String(maxStrike / 100), allow_last_price: String(allowLast) });
       const response = await fetch(`/api/surface?${query}`, { signal: abort.signal, cache: "no-store" });
       const payload = await response.json().catch(() => null);
@@ -74,7 +80,7 @@ export default function Dashboard() {
       setIsSnapshot(false);
     } catch (e) {
       if (id !== requestId.current) return;
-      setError(abort.signal.aborted ? "The request timed out. Your previous view has been kept. Try fewer expirations." : e instanceof Error ? e.message : "Unable to fetch market data.");
+      setError(abort.signal.aborted ? "The request timed out. Your previous view has been kept. Try a shorter expiry horizon." : e instanceof Error ? e.message : "Unable to fetch market data.");
     } finally {
       window.clearTimeout(timeout);
       if (id === requestId.current) setLoading(false);
@@ -85,7 +91,7 @@ export default function Dashboard() {
     ++requestId.current;
     controller.current?.abort();
     setDataset(demo); setIsSnapshot(true); setLoading(false); setError(""); setIncludeEstimates(true);
-    setSymbol("AAPL"); setModel(demo.model); setKind("otm"); setCount(6);
+    setSymbol("AAPL"); setModel(demo.model); setKind("otm"); setMaxDte(365);
     setMinStrike(70); setMaxStrike(130); setAllowLast(true);
     setExpiration(expirations(demo.contracts)[1] ?? demo.contracts[0].expiration);
   }
@@ -130,7 +136,7 @@ export default function Dashboard() {
               <label htmlFor="symbol">Ticker symbol</label><div className="ticker-input"><span aria-hidden="true">⌕</span><input id="symbol" name="symbol" value={symbol} onChange={(e) => setSymbol(e.target.value.toUpperCase())} placeholder="e.g. AAPL" required maxLength={20} pattern="[A-Za-z0-9^][A-Za-z0-9.^=\-]*" autoComplete="off" spellCheck={false} /></div>
               <label htmlFor="model">Pricing model</label><select id="model" value={model} onChange={(e) => setModel(e.target.value as PricingModel)}><option value="black_scholes">Black–Scholes</option><option value="bjerksund_stensland">Bjerksund–Stensland</option></select><p className="field-help">{model === "black_scholes" ? "European exercise assumption" : "American early-exercise approximation"}</p>
               <label htmlFor="kind">Option selection</label><select id="kind" value={kind} onChange={(e) => setKind(e.target.value)}><option value="otm">OTM puts + calls</option><option value="call">Calls only</option><option value="put">Puts only</option></select>
-              <label htmlFor="expirations">Expirations</label><select id="expirations" value={count} onChange={(e) => setCount(Number(e.target.value))}>{[2, 4, 6, 8].map((n) => <option key={n} value={n}>{n} nearest available</option>)}</select>
+              <label htmlFor="expiry-horizon">Expiry horizon</label><select id="expiry-horizon" value={maxDte} onChange={(e) => setMaxDte(Number(e.target.value))}>{expiryHorizons.map(({ days, label }) => <option key={days} value={days}>{label}</option>)}</select><p className="field-help">Fetch all available expirations from 2 days away through the selected horizon.</p>
               <div className="form-divider" /><div className="range-label"><span>Strike range</span><span>% of spot</span></div><div className="range-inputs"><label className="sr-only" htmlFor="min-strike">Minimum strike, percent of spot</label><div><input id="min-strike" type="number" min="1" max="500" value={minStrike} onChange={(e) => setMinStrike(Number(e.target.value))} required /><span>%</span></div><span>—</span><label className="sr-only" htmlFor="max-strike">Maximum strike, percent of spot</label><div><input id="max-strike" type="number" min="1" max="500" value={maxStrike} onChange={(e) => setMaxStrike(Number(e.target.value))} required /><span>%</span></div></div>
               <label className="checkbox-label"><input type="checkbox" checked={allowLast} onChange={(e) => setAllowLast(e.target.checked)} /><span>Allow last-trade estimates</span></label><p className="field-help">Fallback when bid and ask are absent. Trades must be at most 4 days old.</p>
             </fieldset>
