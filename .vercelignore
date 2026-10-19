@@ -9,6 +9,3 @@ tests/
 INTERNAL_DESIGN_NOTES.md
 task1.md
 task2.md
-app.py
-data_fetcher.py
-jax_core.py
