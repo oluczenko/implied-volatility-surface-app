@@ -1,2 +1,19 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "volsurface-api"
+version = "1.0.0"
+description = "Options analytics API backed by NumPy and SciPy"
+requires-python = ">=3.12"
+dynamic = ["dependencies"]
+
+[tool.setuptools]
+packages = ["api"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements-api.txt"] }
+
 [tool.vercel]
 entrypoint = "api.index:app"

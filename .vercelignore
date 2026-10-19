@@ -9,3 +9,8 @@ tests/
 INTERNAL_DESIGN_NOTES.md
 task1.md
 task2.md
+**/node_modules/
+**/.next/
+**/*.tsbuildinfo
+output/
+.playwright-cli/

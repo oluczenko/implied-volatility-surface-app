@@ -1,9 +1,29 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "framework": "fastapi",
-  "functions": {
-    "api/index.py": {
-      "maxDuration": 60
+  "services": {
+    "frontend": {
+      "root": "frontend/",
+      "framework": "nextjs"
+    },
+    "backend": {
+      "root": ".",
+      "framework": "fastapi",
+      "entrypoint": "api.index:app",
+      "functions": {
+        "api/index.py": {
+          "maxDuration": 60,
+          "excludeFiles": "frontend/**"
+        }
+      }
     }
-  }
+  },
+  "rewrites": [
+    { "source": "/api", "destination": { "service": "backend" } },
+    { "source": "/api/(.*)", "destination": { "service": "backend" } },
+    { "source": "/docs", "destination": { "service": "backend" } },
+    { "source": "/docs/(.*)", "destination": { "service": "backend" } },
+    { "source": "/openapi.json", "destination": { "service": "backend" } },
+    { "source": "/redoc", "destination": { "service": "backend" } },
+    { "source": "/(.*)", "destination": { "service": "frontend" } }
+  ]
 }
